@@ -70,24 +70,24 @@ SECURE_BROWSER_ROOT = STATE_DIR / ".tubedrop_secure_browser"
 SECURE_BROWSER_CHOICE = SESSION_DIR / "secure_browser.txt"
 YOUTUBE_HOME = "https://www.youtube.com/"
 
-BG = "#101010"
-PANEL = "#171717"
-PANEL_2 = "#202020"
-PANEL_3 = "#2a2a2a"
-TEXT = "#f8fafc"
-MUTED = "#a3a3a3"
-SUBTLE = "#737373"
+BG = "#111111"
+PANEL = "#191919"
+PANEL_2 = "#242424"
+PANEL_3 = "#303030"
+TEXT = "#f5f5f5"
+MUTED = "#a8a8a8"
+SUBTLE = "#707070"
 BORDER = "#303030"
 ACCENT = "#10a37f"
 ACCENT_HOVER = "#16b894"
 BLUE = "#d4d4d4"
 DANGER = "#fb7185"
 WARN = "#f59e0b"
-LOG_BG = "#0a0a0a"
+LOG_BG = "#0d0d0d"
 
 FONT_STACK = "Segoe UI"
 DEFAULT_OUTPUT_TEMPLATE = "%(title).180B [%(id)s].%(ext)s"
-WINDOW_RADIUS = 18
+WINDOW_RADIUS = 20
 MEDIA_EXTENSIONS = {
     ".mp4",
     ".m4a",
@@ -390,7 +390,7 @@ class PreviewBox(QFrame):
         self._pixmap = QPixmap()
         self._text = text
         self.setObjectName("PreviewFrame")
-        self.setFixedSize(320, 180)
+        self.setFixedSize(256, 144)
 
     def setPixmap(self, pixmap: QPixmap) -> None:  # noqa: N802 - Qt-compatible method name
         self._pixmap = pixmap
@@ -406,7 +406,8 @@ class PreviewBox(QFrame):
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
 
         path = QPainterPath()
-        path.addRoundedRect(QRectF(self.rect()), 16, 16)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path.addRoundedRect(rect, 16, 16)
         painter.fillPath(path, QColor("#0b0b0b"))
         painter.setClipPath(path)
 
@@ -466,6 +467,7 @@ class ModernComboBox(QComboBox):
                 color: {TEXT};
                 padding: 6px;
                 outline: 0;
+                border: none;
                 border-radius: 12px;
                 selection-background-color: {PANEL_3};
             }}
@@ -484,12 +486,12 @@ class ModernComboBox(QComboBox):
                 margin: 6px 2px 6px 0;
             }}
             QScrollBar::handle:vertical {{
-                background: #4a4a4a;
+                background: #505050;
                 min-height: 28px;
                 border-radius: 4px;
             }}
             QScrollBar::handle:vertical:hover {{
-                background: #5c5c5c;
+                background: #626262;
             }}
             QScrollBar::add-line:vertical,
             QScrollBar::sub-line:vertical,
@@ -576,40 +578,36 @@ class TitleBar(QFrame):
         self.host_window = host_window
         self.drag_offset = None
         self.setObjectName("TitleBar")
-        self.setFixedHeight(46)
+        self.setFixedHeight(48)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 7, 8, 7)
-        layout.setSpacing(10)
+        layout.setContentsMargins(12, 8, 8, 8)
+        layout.setSpacing(8)
 
-        mark = QLabel("T")
+        mark = QLabel("▶")
         mark.setObjectName("LogoMark")
         mark.setAlignment(Qt.AlignCenter)
-        mark.setFixedSize(30, 30)
+        mark.setFixedSize(32, 32)
         layout.addWidget(mark)
 
-        brand = QVBoxLayout()
+        brand = QHBoxLayout()
         brand.setContentsMargins(0, 0, 0, 0)
         brand.setSpacing(0)
         title = QLabel(APP_TITLE)
         title.setObjectName("WindowTitle")
-        subtitle = QLabel("YouTube downloader")
-        subtitle.setObjectName("TinyMuted")
         brand.addWidget(title)
-        brand.addWidget(subtitle)
         layout.addLayout(brand, 1)
 
-        auth_label.setObjectName("StatusText")
-        layout.addWidget(auth_dot)
-        layout.addWidget(auth_label)
-
-        separator = QLabel("·")
-        separator.setObjectName("TinyMuted")
-        layout.addWidget(separator)
-
-        status_label.setObjectName("StatusText")
-        layout.addWidget(status_dot)
-        layout.addWidget(status_label)
+        for dot, label in ((auth_dot, auth_label), (status_dot, status_label)):
+            chip = QFrame()
+            chip.setObjectName("StatusPill")
+            chip_layout = QHBoxLayout(chip)
+            chip_layout.setContentsMargins(10, 0, 10, 0)
+            chip_layout.setSpacing(7)
+            label.setObjectName("StatusText")
+            chip_layout.addWidget(dot)
+            chip_layout.addWidget(label)
+            layout.addWidget(chip)
 
         minimize = WindowControlButton("−")
         minimize.clicked.connect(host_window.showMinimized)
@@ -642,8 +640,8 @@ class AuthDialog(BorderlessDialog):
         ensure_session_dir()
         self.setWindowTitle("Безопасный вход YouTube")
         self.setModal(False)
-        self.resize(560, 360)
-        self.setMinimumSize(520, 330)
+        self.resize(520, 310)
+        self.setMinimumSize(500, 300)
         self.setStyleSheet(APP_STYLE)
         self.start_url = start_url or YOUTUBE_HOME
         self.browser = secure_browser_choice()
@@ -658,14 +656,11 @@ class AuthDialog(BorderlessDialog):
 
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(20, 20, 20, 18)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
-        title = QLabel("Безопасный вход через настоящий браузер")
+        title = QLabel("Вход YouTube")
         title.setObjectName("DialogTitle")
-        subtitle = QLabel(
-            "Google блокирует вход во встроенных WebView. TubeDrop откроет отдельный профиль Edge/Chrome, "
-            "а потом сам использует эту сессию для скачивания."
-        )
+        subtitle = QLabel("Войдите в выбранном браузере, затем вернитесь в TubeDrop.")
         subtitle.setObjectName("Muted")
         subtitle.setWordWrap(True)
         layout.addWidget(title)
@@ -688,11 +683,7 @@ class AuthDialog(BorderlessDialog):
         self.state_label.setWordWrap(True)
         layout.addWidget(self.state_label)
 
-        steps = QLabel(
-            "1. Нажмите «Открыть вход».\n"
-            "2. Войдите в Google/YouTube в открывшемся окне.\n"
-            "3. Вернитесь сюда и нажмите «Готово» — TubeDrop закроет свое окно браузера и повторит скачивание."
-        )
+        steps = QLabel("1. Открыть вход\n2. Войти в YouTube\n3. Нажать «Готово»")
         steps.setObjectName("Muted")
         steps.setWordWrap(True)
         layout.addWidget(steps)
@@ -727,9 +718,8 @@ class AuthDialog(BorderlessDialog):
         if not browser:
             self.state_label.setText("Не найден Edge/Chrome/Brave. Установите один из них и перезапустите TubeDrop.")
             return
-        browser_id, label, _path = browser
-        profile = secure_browser_user_data_dir(browser_id)
-        self.state_label.setText(text or f"Будет использован отдельный профиль TubeDrop: {label} ({profile})")
+        _browser_id, label, _path = browser
+        self.state_label.setText(text or f"Выбран браузер: {label}")
 
     def open_secure_browser(self) -> None:
         browser = self.selected_browser()
@@ -943,7 +933,7 @@ class TubeDropApp(QMainWindow):
         self.setWindowTitle(APP_TITLE)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window | Qt.NoDropShadowWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setFixedSize(980, 650)
+        self.setFixedSize(980, 680)
         self.setStyleSheet(APP_STYLE)
 
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
@@ -970,12 +960,12 @@ class TubeDropApp(QMainWindow):
         self.auth_status_label = QLabel("Вход: не проверен")
         self.status_dot = StatusDot("ok")
         self.status_label = QLabel("Готово")
-        self.preview_label = PreviewBox("Превью появится здесь")
-        self.title_label = QLabel("Вставьте ссылку")
-        self.meta_label = QLabel("Получите сведения о видео, затем выберите качество.")
+        self.preview_label = PreviewBox("Превью")
+        self.title_label = QLabel("Ссылка не выбрана")
+        self.meta_label = QLabel("Ожидание данных")
         self.log = QPlainTextEdit()
         self.progress = QProgressBar()
-        self.progress_label = QLabel("Ожидание ссылки")
+        self.progress_label = QLabel("Ожидание")
         self.prepare_progress = QProgressBar()
         self.prepare_label = QLabel("Подготовка файла")
         self.download_btn = QPushButton("Скачать")
@@ -1034,31 +1024,38 @@ class TubeDropApp(QMainWindow):
         body.setSpacing(10)
         main.addLayout(body, 1)
 
-        left = QFrame()
-        left.setObjectName("Card")
-        left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(10, 10, 10, 10)
-        left_layout.setSpacing(8)
-        body.addWidget(left, 3)
+        content_col = QVBoxLayout()
+        content_col.setSpacing(10)
+        body.addLayout(content_col, 1)
 
-        media_row = QHBoxLayout()
-        media_row.setSpacing(12)
-        media_row.addWidget(self.preview_label)
+        media_panel = QFrame()
+        media_panel.setObjectName("Card")
+        media_panel.setFixedHeight(168)
+        media_layout = QHBoxLayout(media_panel)
+        media_layout.setContentsMargins(12, 12, 12, 12)
+        media_layout.setSpacing(14)
+        media_layout.addWidget(self.preview_label)
 
         info_col = QVBoxLayout()
-        info_col.setSpacing(7)
+        info_col.setSpacing(8)
         self.title_label.setObjectName("VideoTitle")
         self.title_label.setWordWrap(True)
-        self.title_label.setMaximumHeight(82)
+        self.title_label.setMaximumHeight(86)
         info_col.addWidget(self.title_label)
 
         self.meta_label.setObjectName("Muted")
         self.meta_label.setWordWrap(True)
-        self.meta_label.setMaximumHeight(58)
+        self.meta_label.setMaximumHeight(64)
         info_col.addWidget(self.meta_label)
         info_col.addStretch(1)
-        media_row.addLayout(info_col, 1)
-        left_layout.addLayout(media_row)
+        media_layout.addLayout(info_col, 1)
+        content_col.addWidget(media_panel)
+
+        log_panel = QFrame()
+        log_panel.setObjectName("Card")
+        log_layout = QVBoxLayout(log_panel)
+        log_layout.setContentsMargins(12, 10, 12, 12)
+        log_layout.setSpacing(8)
 
         log_header = QHBoxLayout()
         log_title = QLabel("Журнал")
@@ -1068,16 +1065,17 @@ class TubeDropApp(QMainWindow):
         clear_btn.setObjectName("FlatButton")
         clear_btn.clicked.connect(self.log.clear)
         log_header.addWidget(clear_btn)
-        left_layout.addLayout(log_header)
+        log_layout.addLayout(log_header)
 
         self.log.setObjectName("LogBox")
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(500)
-        left_layout.addWidget(self.log, 1)
+        log_layout.addWidget(self.log, 1)
+        content_col.addWidget(log_panel, 1)
 
         right = QFrame()
         right.setObjectName("Card")
-        right.setFixedWidth(330)
+        right.setFixedWidth(320)
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(10, 10, 10, 10)
         right_layout.setSpacing(5)
@@ -1090,6 +1088,7 @@ class TubeDropApp(QMainWindow):
         self.add_labeled(right_layout, "Качество", self.quality_combo)
 
         folder_row = QHBoxLayout()
+        folder_row.setSpacing(8)
         self.folder_input.setObjectName("Input")
         folder_row.addWidget(self.folder_input, 1)
         folder_btn = QPushButton("...")
@@ -1101,21 +1100,16 @@ class TubeDropApp(QMainWindow):
         self.filename_input.setObjectName("Input")
         self.add_labeled(right_layout, "Имя файла", self.filename_input)
 
-        checks = QFrame()
-        checks.setObjectName("SoftBox")
-        checks_layout = QVBoxLayout(checks)
-        checks_layout.setContentsMargins(10, 8, 10, 8)
-        checks_layout.setSpacing(4)
-        checks_layout.addWidget(self.recode_check)
-        checks_layout.addWidget(self.playlist_check)
-        right_layout.addWidget(checks)
+        right_layout.addSpacing(2)
+        right_layout.addWidget(self.recode_check)
+        right_layout.addWidget(self.playlist_check)
 
         session_actions = QHBoxLayout()
         session_actions.setSpacing(8)
-        session_label = QLabel("Сессия YouTube")
+        session_label = QLabel("YouTube")
         session_label.setObjectName("FieldLabel")
         session_actions.addWidget(session_label, 1)
-        auth_btn = QPushButton("Открыть")
+        auth_btn = QPushButton("Вход")
         auth_btn.setObjectName("SecondaryButton")
         auth_btn.clicked.connect(lambda: self.open_auth_dialog("fetch"))
         reset_btn = QPushButton("Сброс")
@@ -1146,7 +1140,7 @@ class TubeDropApp(QMainWindow):
         right_layout.addWidget(self.prepare_progress)
 
         actions = QHBoxLayout()
-        actions.addStretch(1)
+        actions.setSpacing(8)
         self.cancel_btn.setObjectName("DangerButton")
         self.cancel_btn.clicked.connect(self.cancel_download)
         self.cancel_btn.setEnabled(False)
@@ -1749,10 +1743,7 @@ APP_STYLE = f"""
     font-size: 13px;
     color: {TEXT};
 }}
-QMainWindow {{
-    background: transparent;
-}}
-QDialog {{
+QMainWindow, QDialog {{
     background: transparent;
 }}
 QWidget {{
@@ -1762,52 +1753,41 @@ QWidget#RootWindow {{
     background: {BG};
     border-radius: {WINDOW_RADIUS}px;
 }}
-QLabel {{
+QLabel, QFrame, QCheckBox {{
     background: transparent;
     border: none;
     padding: 0;
 }}
-QCheckBox {{
-    background: transparent;
-}}
-QFrame {{
-    background: transparent;
-}}
 QFrame#TitleBar {{
-    background: #181818;
+    background: #161616;
     border-radius: 18px;
 }}
 QLabel#LogoMark {{
     background: {ACCENT};
     color: #ffffff;
-    border-radius: 10px;
-    font-size: 16px;
+    border-radius: 16px;
+    font-size: 14px;
     font-weight: 900;
 }}
 QLabel#WindowTitle {{
-    font-size: 15px;
+    font-size: 16px;
     font-weight: 850;
 }}
 QLabel#TinyMuted {{
     color: {SUBTLE};
     font-size: 10px;
 }}
-QLabel#AppTitle {{
-    font-size: 28px;
-    font-weight: 800;
-    letter-spacing: 0;
-}}
 QLabel#DialogTitle, QLabel#PanelTitle {{
-    font-size: 20px;
-    font-weight: 800;
+    font-size: 18px;
+    font-weight: 850;
 }}
 QLabel#VideoTitle {{
-    font-size: 18px;
-    font-weight: 800;
+    font-size: 19px;
+    font-weight: 850;
 }}
 QLabel#SectionTitle, QLabel#FieldLabel {{
     font-size: 12px;
-    font-weight: 700;
+    font-weight: 750;
     color: {TEXT};
 }}
 QLabel#Muted {{
@@ -1817,15 +1797,14 @@ QFrame#Card {{
     background: {PANEL};
     border-radius: 18px;
 }}
-QFrame#SoftBox {{
-    background: {PANEL_2};
-    border-radius: 14px;
-}}
 QFrame#StatusPill {{
-    background: {PANEL};
+    background: {PANEL_2};
     border-radius: 15px;
+    min-height: 30px;
 }}
 QLabel#StatusText {{
+    color: {MUTED};
+    font-size: 12px;
     font-weight: 700;
 }}
 QFrame#PreviewFrame {{
@@ -1834,17 +1813,25 @@ QFrame#PreviewFrame {{
 }}
 QLineEdit, QComboBox, QLineEdit#Input, QComboBox#Input, QLineEdit#UrlInput, QLineEdit#CompactInput {{
     background: {PANEL_2};
-    border-radius: 12px;
-    padding: 8px 10px;
+    border: none;
+    border-radius: 13px;
+    padding: 7px 10px;
     min-height: 20px;
     selection-background-color: {ACCENT};
 }}
+QLineEdit:hover, QComboBox:hover {{
+    background: #292929;
+}}
+QLineEdit:focus, QComboBox:focus {{
+    background: #2b2b2b;
+}}
 QLineEdit#UrlInput {{
     font-size: 14px;
-    padding: 10px 12px;
+    padding: 10px 13px;
 }}
 QComboBox::drop-down {{
     width: 0;
+    border: none;
 }}
 QComboBox::down-arrow {{
     image: none;
@@ -1855,6 +1842,7 @@ QComboBox QAbstractItemView {{
     background: {PANEL_2};
     selection-background-color: {PANEL_3};
     outline: 0;
+    border: none;
 }}
 QScrollBar:vertical {{
     background: transparent;
@@ -1862,23 +1850,26 @@ QScrollBar:vertical {{
     margin: 6px 2px 6px 0;
 }}
 QScrollBar::handle:vertical {{
-    background: #4a4a4a;
+    background: #505050;
     min-height: 28px;
     border-radius: 4px;
 }}
 QScrollBar::handle:vertical:hover {{
-    background: #5c5c5c;
+    background: #626262;
 }}
 QScrollBar::add-line:vertical,
 QScrollBar::sub-line:vertical,
 QScrollBar::add-page:vertical,
 QScrollBar::sub-page:vertical {{
     background: transparent;
+    border: none;
     height: 0;
 }}
 QPushButton {{
-    border-radius: 12px;
-    padding: 9px 14px;
+    border: none;
+    border-radius: 13px;
+    min-height: 22px;
+    padding: 7px 13px;
     font-weight: 750;
 }}
 QPushButton#WindowButton, QPushButton#CloseButton {{
@@ -1905,7 +1896,7 @@ QPushButton#PrimaryButton:hover {{
     background: {ACCENT_HOVER};
 }}
 QPushButton#PrimaryButton:disabled {{
-    background: #2a2a2a;
+    background: #282828;
     color: {SUBTLE};
 }}
 QPushButton#DangerButton {{
@@ -1916,15 +1907,15 @@ QPushButton#DangerButton:hover {{
     background: #3b1d28;
 }}
 QPushButton#DangerButton:disabled {{
-    background: #252525;
+    background: #242424;
     color: {SUBTLE};
 }}
 QPushButton#SecondaryButton {{
-    background: {PANEL_3};
-    color: {BLUE};
+    background: {PANEL_2};
+    color: {TEXT};
 }}
 QPushButton#SecondaryButton:hover {{
-    background: #303030;
+    background: {PANEL_3};
 }}
 QPushButton#FlatButton {{
     background: transparent;
@@ -1935,34 +1926,46 @@ QPushButton#FlatButton:hover {{
     background: {PANEL_2};
 }}
 QPushButton#IconButton {{
+    background: {PANEL_2};
+    color: {TEXT};
+    min-width: 36px;
+    max-width: 36px;
+    padding-left: 0;
+    padding-right: 0;
+}}
+QPushButton#IconButton:hover {{
     background: {PANEL_3};
-    color: {BLUE};
-    min-width: 34px;
-    max-width: 34px;
 }}
 QCheckBox {{
     color: {MUTED};
     spacing: 8px;
+    min-height: 24px;
 }}
 QCheckBox::indicator {{
     width: 17px;
     height: 17px;
-    border-radius: 5px;
-    background: {PANEL};
+    border: none;
+    border-radius: 6px;
+    background: {PANEL_2};
+}}
+QCheckBox::indicator:hover {{
+    background: {PANEL_3};
 }}
 QCheckBox::indicator:checked {{
     background: {ACCENT};
 }}
 QPlainTextEdit#LogBox {{
     background: {LOG_BG};
+    border: none;
     border-radius: 14px;
     padding: 9px;
-    color: #d8dee9;
+    color: #d7d7d7;
     font-family: Consolas, monospace;
     font-size: 11px;
 }}
 QProgressBar#DownloadProgress {{
     background: {PANEL_2};
+    border: none;
     border-radius: 7px;
     height: 12px;
     text-align: center;
@@ -1975,15 +1978,7 @@ QProgressBar#DownloadProgress::chunk {{
 QMessageBox {{
     background: {BG};
 }}
-QFrame#DialogPanel {{
-    background: {PANEL};
-    border-radius: 22px;
-}}
-QFrame#SuccessPanel {{
-    background: {PANEL};
-    border-radius: 22px;
-}}
-QFrame#MessagePanel {{
+QFrame#DialogPanel, QFrame#SuccessPanel, QFrame#MessagePanel {{
     background: {PANEL};
     border-radius: 22px;
 }}
@@ -2000,6 +1995,7 @@ QLabel#SuccessTitle {{
 }}
 QLabel#DoneFileName {{
     background: #0d0d0d;
+    border: none;
     border-radius: 12px;
     color: {TEXT};
     padding: 9px 11px;
