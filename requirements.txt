@@ -1,0 +1,7 @@
+yt-dlp>=2024.12.13
+yt-dlp-ejs>=0.8.0
+nodejs-wheel-binaries>=20.18.0
+PySide6>=6.7.0
+Pillow>=10.0.0
+requests>=2.31.0
+imageio-ffmpeg>=0.5.1

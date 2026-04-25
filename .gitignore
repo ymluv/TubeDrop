@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+
+.venv/
+
+.tubedrop_profile/
+.tubedrop_secure_browser/
+
+downloads/
+dist/
+build/
+
+*.log
+*.tmp
+*.bak
