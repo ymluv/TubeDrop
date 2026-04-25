@@ -4,11 +4,23 @@
 
 ## Запуск
 
+### Готовый exe
+
+1. Скачайте `TubeDrop-windows-x64.zip` из Releases.
+2. Распакуйте архив.
+3. Откройте `TubeDrop.exe`.
+
+Python и зависимости устанавливать не нужно.
+
+### Из исходников
+
 1. Откройте `run.bat`.
 2. Дождитесь запуска приложения.
 
 При первом запуске создается `.venv` и устанавливаются зависимости из `requirements.txt`.
 После запуска приложения окно `cmd` закрывается.
+
+Для запуска из исходников нужен Python 3.10+.
 
 ## Использование
 
@@ -55,13 +67,28 @@
 
 Используется отдельный профиль браузера TubeDrop.
 
-Папка профиля:
+Папка профиля в exe-сборке:
 
 ```text
-.tubedrop_secure_browser
+%LOCALAPPDATA%\TubeDrop\.tubedrop_secure_browser
 ```
 
 Кнопка `Сброс` удаляет сохраненную сессию.
+
+## Сборка exe
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
+```
+
+Результат:
+
+```text
+dist\TubeDrop.exe
+dist\TubeDrop-windows-x64.zip
+```
+
+В exe включены Python, PySide6, `yt-dlp`, Node.js и ffmpeg.
 
 ## Совместимость
 

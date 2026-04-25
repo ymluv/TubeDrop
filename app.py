@@ -52,10 +52,21 @@ except ImportError as exc:  # pragma: no cover - shown only before dependencies 
 
 
 APP_TITLE = "TubeDrop"
-APP_DIR = Path(__file__).resolve().parent
-SESSION_DIR = APP_DIR / ".tubedrop_profile"
+APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+
+
+def app_state_dir() -> Path:
+    if getattr(sys, "frozen", False) and os.name == "nt":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            return Path(local_app_data) / APP_TITLE
+    return APP_DIR
+
+
+STATE_DIR = app_state_dir()
+SESSION_DIR = STATE_DIR / ".tubedrop_profile"
 COOKIE_FILE = SESSION_DIR / "youtube_cookies.txt"
-SECURE_BROWSER_ROOT = APP_DIR / ".tubedrop_secure_browser"
+SECURE_BROWSER_ROOT = STATE_DIR / ".tubedrop_secure_browser"
 SECURE_BROWSER_CHOICE = SESSION_DIR / "secure_browser.txt"
 YOUTUBE_HOME = "https://www.youtube.com/"
 
