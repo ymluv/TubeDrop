@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 try:
     import imageio_ffmpeg
@@ -38,6 +39,7 @@ try:
         QWidget,
     )
     from yt_dlp import YoutubeDL
+    from yt_dlp.cookies import extract_cookies_from_browser
     from yt_dlp.utils import DownloadCancelled
 except ImportError as exc:  # pragma: no cover - shown only before dependencies are installed
     app = QApplication(sys.argv)
@@ -69,6 +71,10 @@ COOKIE_FILE = SESSION_DIR / "youtube_cookies.txt"
 SECURE_BROWSER_ROOT = STATE_DIR / ".tubedrop_secure_browser"
 SECURE_BROWSER_CHOICE = SESSION_DIR / "secure_browser.txt"
 YOUTUBE_HOME = "https://www.youtube.com/"
+TIKTOK_HOME = "https://www.tiktok.com/"
+INSTAGRAM_HOME = "https://www.instagram.com/"
+PINTEREST_HOME = "https://www.pinterest.com/"
+SUPPORTED_SITES_TEXT = "YouTube, TikTok, Instagram или Pinterest"
 
 BG = "#111111"
 PANEL = "#191919"
@@ -100,11 +106,71 @@ MEDIA_EXTENSIONS = {
     ".opus",
 }
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+MERGED_MP4_VIDEO_AUDIO_FORMAT = (
+    "bv[vcodec^=avc1]+ba[acodec^=mp4a]/"
+    "bv[ext=mp4]+ba[ext=m4a]/"
+    "bv+ba"
+)
+PROGRESSIVE_VIDEO_AUDIO_FORMAT = (
+    "b[ext=mp4][vcodec!=none][acodec!=none]/"
+    "best[ext=mp4][vcodec!=none][acodec!=none]/"
+    "b[vcodec!=none][acodec!=none]/"
+    "best[vcodec!=none][acodec!=none]"
+)
+UNIVERSAL_VIDEO_AUDIO_FORMAT = f"{MERGED_MP4_VIDEO_AUDIO_FORMAT}/{PROGRESSIVE_VIDEO_AUDIO_FORMAT}"
+PROGRESSIVE_FIRST_VIDEO_AUDIO_FORMAT = f"{PROGRESSIVE_VIDEO_AUDIO_FORMAT}/{MERGED_MP4_VIDEO_AUDIO_FORMAT}"
 
 
 def clean_yt_text(value: Any) -> str:
     text = ANSI_RE.sub("", str(value))
     return " ".join(text.replace("\r", " ").split())
+
+
+def host_from_url(url: str) -> str:
+    try:
+        host = urlparse(url if "://" in url else f"https://{url}").netloc.lower()
+    except ValueError:
+        return ""
+    return host[4:] if host.startswith("www.") else host
+
+
+def normalize_url(url: str) -> str:
+    raw = url.strip()
+    if raw and "://" not in raw and "." in raw.split("/", 1)[0]:
+        return f"https://{raw}"
+    return raw
+
+
+def platform_label_for_url(url: str) -> str:
+    host = host_from_url(url)
+    if "tiktok.com" in host:
+        return "TikTok"
+    if "instagram.com" in host:
+        return "Instagram"
+    if host == "pin.it" or host.endswith(".pin.it") or host.startswith("pinterest.") or ".pinterest." in host:
+        return "Pinterest"
+    if "youtu.be" in host or "youtube.com" in host:
+        return "YouTube"
+    return "сайт"
+
+
+def platform_home_for_url(url: str) -> str:
+    host = host_from_url(url)
+    if "tiktok.com" in host:
+        return TIKTOK_HOME
+    if "instagram.com" in host:
+        return INSTAGRAM_HOME
+    if host == "pin.it" or host.endswith(".pin.it") or host.startswith("pinterest.") or ".pinterest." in host:
+        return PINTEREST_HOME
+    return YOUTUBE_HOME
+
+
+def is_tiktok_info(info: dict[str, Any]) -> bool:
+    extractor = str(info.get("extractor_key") or info.get("extractor") or "").lower()
+    if "tiktok" in extractor:
+        return True
+    source_url = str(info.get("webpage_url") or info.get("original_url") or info.get("url") or "")
+    return platform_label_for_url(source_url) == "TikTok"
 
 
 def default_download_dir() -> Path:
@@ -313,6 +379,8 @@ def is_requested_format_unavailable(exc: Exception) -> bool:
 def has_downloadable_av_formats(info: dict[str, Any] | None) -> bool:
     if not info:
         return False
+    if info.get("url") and (info.get("vcodec") != "none" or info.get("acodec") != "none"):
+        return True
     for fmt in info.get("formats") or []:
         has_video = fmt.get("vcodec") and fmt.get("vcodec") != "none"
         has_audio = fmt.get("acodec") and fmt.get("acodec") != "none"
@@ -324,6 +392,10 @@ def has_downloadable_av_formats(info: dict[str, Any] | None) -> bool:
 class YtdlpLogger:
     def __init__(self, events: queue.Queue[tuple[str, Any]]) -> None:
         self.events = events
+
+    def info(self, msg: str) -> None:
+        if "Extracted" in msg and "cookies" in msg:
+            self.events.put(("log", clean_yt_text(msg)))
 
     def debug(self, msg: str) -> None:
         if msg.startswith("[debug]"):
@@ -638,12 +710,14 @@ class AuthDialog(BorderlessDialog):
     def __init__(self, parent: QWidget | None = None, start_url: str = YOUTUBE_HOME) -> None:
         super().__init__(parent)
         ensure_session_dir()
-        self.setWindowTitle("Безопасный вход YouTube")
+        self.platform_label = platform_label_for_url(start_url)
+        self.platform_home = platform_home_for_url(start_url)
+        self.setWindowTitle(f"Безопасный вход {self.platform_label}")
         self.setModal(False)
         self.resize(520, 310)
         self.setMinimumSize(500, 300)
         self.setStyleSheet(APP_STYLE)
-        self.start_url = start_url or YOUTUBE_HOME
+        self.start_url = start_url or self.platform_home
         self.browser = secure_browser_choice()
         self.process: subprocess.Popen | None = None
 
@@ -658,7 +732,7 @@ class AuthDialog(BorderlessDialog):
         layout.setContentsMargins(20, 20, 20, 18)
         layout.setSpacing(10)
 
-        title = QLabel("Вход YouTube")
+        title = QLabel(f"Вход {self.platform_label}")
         title.setObjectName("DialogTitle")
         subtitle = QLabel("Войдите в выбранном браузере, затем вернитесь в TubeDrop.")
         subtitle.setObjectName("Muted")
@@ -683,7 +757,11 @@ class AuthDialog(BorderlessDialog):
         self.state_label.setWordWrap(True)
         layout.addWidget(self.state_label)
 
-        steps = QLabel("1. Открыть вход\n2. Войти в YouTube\n3. Нажать «Готово»")
+        steps = QLabel(
+            f"1. Открыть вход\n"
+            f"2. Войти в {self.platform_label}\n"
+            "3. Нажать «Готово», не закрывая браузер"
+        )
         steps.setObjectName("Muted")
         steps.setWordWrap(True)
         layout.addWidget(steps)
@@ -730,7 +808,7 @@ class AuthDialog(BorderlessDialog):
         SECURE_BROWSER_CHOICE.write_text(browser_id, encoding="utf-8")
         user_data = secure_browser_user_data_dir(browser_id)
         user_data.mkdir(parents=True, exist_ok=True)
-        url = self.start_url if self.start_url.startswith(("http://", "https://")) else YOUTUBE_HOME
+        url = self.start_url if self.start_url.startswith(("http://", "https://")) else self.platform_home
         args = [
             str(executable),
             f"--user-data-dir={user_data}",
@@ -744,7 +822,7 @@ class AuthDialog(BorderlessDialog):
         except OSError as exc:
             show_app_message(self, "Не удалось открыть браузер", str(exc), "error")
             return
-        self.update_state(f"Открыт {label}. Войдите в YouTube, затем нажмите «Готово».")
+        self.update_state(f"Открыт {label}. Войдите в {self.platform_label}, затем нажмите «Готово».")
 
     def finish_secure_login(self) -> None:
         browser = self.selected_browser()
@@ -752,9 +830,8 @@ class AuthDialog(BorderlessDialog):
             return
         browser_id, label, _path = browser
         SECURE_BROWSER_CHOICE.write_text(browser_id, encoding="utf-8")
-        self.close_browser_process()
-        self.update_state(f"Сессия {label} сохранена. TubeDrop повторит запрос.")
-        QTimer.singleShot(800, self.complete_secure_login)
+        self.update_state(f"Сессия {label} отмечена. TubeDrop сохранит cookie и повторит запрос.")
+        QTimer.singleShot(500, self.complete_secure_login)
 
     def complete_secure_login(self) -> None:
         self.session_saved.emit(1)
@@ -946,7 +1023,7 @@ class TubeDropApp(QMainWindow):
         self.pending_download_choice: DownloadChoice | None = None
 
         self.url_input = QLineEdit()
-        self.url_input.setPlaceholderText("https://www.youtube.com/watch?v=...")
+        self.url_input.setPlaceholderText("Ссылка на YouTube, TikTok, Instagram или Pinterest")
         self.url_input.returnPressed.connect(self.fetch_info)
 
         self.folder_input = QLineEdit(str(default_download_dir()))
@@ -1106,7 +1183,7 @@ class TubeDropApp(QMainWindow):
 
         session_actions = QHBoxLayout()
         session_actions.setSpacing(8)
-        session_label = QLabel("YouTube")
+        session_label = QLabel("Сессия")
         session_label.setObjectName("FieldLabel")
         session_actions.addWidget(session_label, 1)
         auth_btn = QPushButton("Вход")
@@ -1200,14 +1277,18 @@ class TubeDropApp(QMainWindow):
             self.auth_dialog.raise_()
             self.auth_dialog.activateWindow()
             return
-        start_url = self.url_input.text().strip() or YOUTUBE_HOME
+        start_url = normalize_url(self.url_input.text()) or YOUTUBE_HOME
         self.auth_dialog = AuthDialog(self, start_url=start_url)
         self.auth_dialog.session_saved.connect(self.on_session_saved)
         self.auth_dialog.show()
 
     def on_session_saved(self, count: int) -> None:
-        self.log_message("Безопасная сессия YouTube сохранена.")
-        self.progress_label.setText("Сессия YouTube сохранена. Повторяю запрос...")
+        platform_label = platform_label_for_url(self.url_input.text().strip())
+        self.log_message(f"Безопасная сессия {platform_label} сохранена.")
+        if self.refresh_cookie_file_from_secure_browser():
+            self.progress_label.setText(f"Сессия {platform_label} сохранена. Повторяю запрос...")
+        else:
+            self.progress_label.setText("Сессия отмечена. Пробую повторить запрос...")
         self.update_auth_status("Вход: выполнен", "ok")
         if self.pending_retry == "download" and self.info:
             QTimer.singleShot(300, self.download)
@@ -1235,10 +1316,12 @@ class TubeDropApp(QMainWindow):
         self.log_message("Запрошена отмена скачивания.")
 
     def fetch_info(self) -> None:
-        url = self.url_input.text().strip()
+        url = normalize_url(self.url_input.text())
         if not url:
-            show_app_message(self, "Нужна ссылка", "Вставьте ссылку на YouTube-видео.", "info")
+            show_app_message(self, "Нужна ссылка", f"Вставьте ссылку на видео из {SUPPORTED_SITES_TEXT}.", "info")
             return
+        if url != self.url_input.text().strip():
+            self.url_input.setText(url)
         if self.worker and self.worker.is_alive():
             return
         self.clear_log()
@@ -1270,13 +1353,14 @@ class TubeDropApp(QMainWindow):
                 if entries:
                     info = entries[0]
             if info and not has_downloadable_av_formats(info):
+                platform_label = platform_label_for_url(url)
                 self.events.put(
                     (
                         "auth_required",
                         {
                             "message": (
-                                "YouTube не вернул доступные форматы для скачивания. "
-                                "Обычно это означает, что нужна безопасная сессия YouTube."
+                                f"{platform_label} не вернул доступные форматы для скачивания. "
+                                f"Обычно это означает, что нужна безопасная сессия {platform_label}."
                             ),
                             "retry": "fetch",
                         },
@@ -1285,27 +1369,53 @@ class TubeDropApp(QMainWindow):
                 return
             self.events.put(("info", info))
         except Exception as exc:  # noqa: BLE001 - shown to user
-            message = self.friendly_error("Не удалось получить данные", exc)
+            message = self.friendly_error("Не удалось получить данные", exc, platform_label_for_url(url))
             if self.needs_in_app_session(exc):
                 self.events.put(("auth_required", {"message": message, "retry": "fetch"}))
             else:
                 self.events.put(("error", message))
 
-    def apply_cookie_options(self, options: dict[str, Any]) -> None:
+    def refresh_cookie_file_from_secure_browser(self) -> bool:
         browser = secure_browser_choice()
         if browser:
             browser_id, label, _path = browser
             profile = secure_browser_profile_dir(browser_id)
             if profile.exists():
-                options["cookiesfrombrowser"] = (browser_id, str(profile), None, None)
-                self.events.put(("log", f"Использую безопасную сессию TubeDrop: {label}."))
-                return
+                try:
+                    ensure_session_dir()
+                    jar = extract_cookies_from_browser(browser_id, str(profile), YtdlpLogger(self.events))
+                    if not len(jar):
+                        self.events.put(("log", f"Профиль {label} пока не содержит cookies."))
+                        return False
+                    temp_cookie_file = COOKIE_FILE.with_suffix(".tmp")
+                    jar.save(str(temp_cookie_file), ignore_discard=True, ignore_expires=True)
+                    temp_cookie_file.replace(COOKIE_FILE)
+                    self.events.put(("log", f"Сессия TubeDrop обновлена из {label}."))
+                    return True
+                except Exception as exc:  # noqa: BLE001 - cookie refresh should not break fallback
+                    self.events.put(
+                        (
+                            "log",
+                            "Не удалось обновить cookies из браузера. "
+                            f"Если сервис снова попросит вход, закройте окно входа и повторите запрос. Подробности: {clean_yt_text(exc)}",
+                        )
+                    )
+        return False
+
+    def apply_cookie_options(self, options: dict[str, Any]) -> None:
+        refreshed = self.refresh_cookie_file_from_secure_browser()
         if COOKIE_FILE.exists() and COOKIE_FILE.stat().st_size > 60:
             options["cookiefile"] = str(COOKIE_FILE)
-            self.events.put(("log", "Использую встроенную сессию YouTube."))
+            if refreshed:
+                self.events.put(("log", "Использую свежую сохранённую сессию TubeDrop."))
+            else:
+                self.events.put(("log", "Использую последнюю сохранённую сессию TubeDrop."))
 
     def build_choices(self, info: dict[str, Any]) -> list[DownloadChoice]:
         formats = info.get("formats") or []
+        prefer_progressive = is_tiktok_info(info)
+        primary_video_format = PROGRESSIVE_FIRST_VIDEO_AUDIO_FORMAT if prefer_progressive else UNIVERSAL_VIDEO_AUDIO_FORMAT
+        fallback_video_format = UNIVERSAL_VIDEO_AUDIO_FORMAT
         heights = sorted(
             {
                 fmt.get("height")
@@ -1318,20 +1428,15 @@ class TubeDropApp(QMainWindow):
         choices = [
             DownloadChoice(
                 "Лучшее MP4: видео + аудио",
-                (
-                    "bv*[vcodec^=avc1]+ba[acodec^=mp4a]/"
-                    "bv*[ext=mp4]+ba[ext=m4a]/"
-                    "bv*+ba[acodec^=mp4a]/"
-                    "best[ext=mp4]/best/b"
-                ),
+                primary_video_format,
                 "video",
-                fallback_format="bestvideo*+bestaudio/best/b",
+                fallback_format=fallback_video_format,
             ),
             DownloadChoice(
-                "Максимум: собрать MP4",
-                "bestvideo*+ba[acodec^=mp4a]/bestvideo*+bestaudio/best/b",
+                "Максимум: видео + аудио",
+                UNIVERSAL_VIDEO_AUDIO_FORMAT,
                 "video",
-                fallback_format="bestvideo*+bestaudio/best/b",
+                fallback_format=PROGRESSIVE_FIRST_VIDEO_AUDIO_FORMAT,
             ),
         ]
 
@@ -1342,18 +1447,28 @@ class TubeDropApp(QMainWindow):
                 if fmt.get("vcodec") != "none" and fmt.get("height") == height and fmt.get("fps")
             ]
             fps_hint = f" {int(max(fps_values))}fps" if fps_values and max(fps_values) > 30 else ""
+            merged_height_format = (
+                f"bv[height<={height}][vcodec^=avc1]+ba[acodec^=mp4a]/"
+                f"bv[height<={height}][ext=mp4]+ba[ext=m4a]/"
+                f"bv[height<={height}]+ba"
+            )
+            progressive_height_format = (
+                f"b[height<={height}][ext=mp4][vcodec!=none][acodec!=none]/"
+                f"best[height<={height}][ext=mp4][vcodec!=none][acodec!=none]/"
+                f"b[height<={height}][vcodec!=none][acodec!=none]/"
+                f"best[height<={height}][vcodec!=none][acodec!=none]"
+            )
+            height_format = (
+                f"{progressive_height_format}/{merged_height_format}"
+                if prefer_progressive
+                else f"{merged_height_format}/{progressive_height_format}"
+            )
             choices.append(
                 DownloadChoice(
                     f"{height}p{fps_hint} MP4",
-                    (
-                        f"bv*[height<={height}]+ba[acodec^=mp4a]/"
-                        f"bv*[height<={height}]+ba[ext=m4a]/"
-                        f"b[height<={height}][ext=mp4]/"
-                        f"best[height<={height}][ext=mp4]/"
-                        f"best[height<={height}]/best/b"
-                    ),
+                    height_format,
                     "video",
-                    fallback_format="bestvideo*+bestaudio/best/b",
+                    fallback_format=fallback_video_format,
                 )
             )
 
@@ -1451,7 +1566,7 @@ class TubeDropApp(QMainWindow):
             return
 
         self.pending_download_choice = choice
-        url = self.url_input.text().strip()
+        url = normalize_url(self.url_input.text())
         output_template = self.output_template(folder)
         noplaylist = not self.playlist_check.isChecked()
         recode = self.recode_check.isChecked()
@@ -1575,7 +1690,7 @@ class TubeDropApp(QMainWindow):
         except DownloadCancelled:
             self.events.put(("cancelled", None))
         except Exception as exc:  # noqa: BLE001 - shown to user
-            message = self.friendly_error("Скачивание остановлено", exc)
+            message = self.friendly_error("Скачивание остановлено", exc, platform_label_for_url(url))
             if self.needs_in_app_session(exc):
                 self.events.put(("auth_required", {"message": message, "retry": "download"}))
             else:
@@ -1620,11 +1735,11 @@ class TubeDropApp(QMainWindow):
         elif name:
             self.events.put(("prepare_progress", (-1, "Финальная подготовка файла...")))
 
-    def friendly_error(self, prefix: str, exc: Exception) -> str:
+    def friendly_error(self, prefix: str, exc: Exception, platform_label: str = "сервис") -> str:
         raw = clean_yt_text(exc)
         if self.needs_in_app_session(exc):
             return (
-                f"{prefix}: YouTube запросил проверку или вход. "
+                f"{prefix}: {platform_label} запросил проверку или вход. "
                 "Открою безопасный вход через отдельный профиль браузера. "
                 f"Подробности: {raw}"
             )
@@ -1634,9 +1749,14 @@ class TubeDropApp(QMainWindow):
         raw = str(exc).lower()
         markers = [
             "sign in to confirm",
+            "sign in",
             "not a bot",
             "confirm you're not a bot",
             "confirm you’re not a bot",
+            "login required",
+            "log in",
+            "logged in",
+            "authentication required",
             "use --cookies-from-browser",
             "use --cookies",
             "cookie database",
@@ -1708,14 +1828,14 @@ class TubeDropApp(QMainWindow):
                 self.set_busy(False, "Отменено")
             elif event == "auth_required":
                 data = payload if isinstance(payload, dict) else {}
-                message = str(data.get("message") or "YouTube запросил проверку.")
+                message = str(data.get("message") or "Сервис запросил проверку.")
                 retry = str(data.get("retry") or "fetch")
                 self.update_auth_status("Вход: нужен", "warn")
                 self.progress.setRange(0, 100)
                 self.progress.setValue(0)
                 self.prepare_progress.setRange(0, 100)
                 self.prepare_progress.setValue(0)
-                self.progress_label.setText("Нужен безопасный вход YouTube.")
+                self.progress_label.setText("Нужен безопасный вход.")
                 self.log_message(message, error=True)
                 self.set_busy(False, "Проверка")
                 self.open_auth_dialog(retry)
