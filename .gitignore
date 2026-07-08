@@ -5,6 +5,8 @@ __pycache__/
 
 .tubedrop_profile/
 .tubedrop_secure_browser/
+tubedrop_state.json
+history_thumbnails/
 
 downloads/
 dist/

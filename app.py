@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import queue
 import re
@@ -18,8 +19,9 @@ try:
     import imageio_ffmpeg
     import requests
     from PIL import Image, ImageOps
-    from PySide6.QtCore import QPointF, QRectF, QTimer, Qt, Signal
-    from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
+    from PySide6.QtCore import QByteArray, QPointF, QRectF, QTimer, Qt, Signal
+    from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap
+    from PySide6.QtSvg import QSvgRenderer
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -27,14 +29,15 @@ try:
         QDialog,
         QFileDialog,
         QFrame,
+        QGridLayout,
         QHBoxLayout,
         QLabel,
         QLineEdit,
         QMainWindow,
         QMessageBox,
-        QPlainTextEdit,
         QProgressBar,
         QPushButton,
+        QScrollArea,
         QVBoxLayout,
         QWidget,
     )
@@ -57,15 +60,19 @@ APP_TITLE = "TubeDrop"
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 
 
+def resource_path(relative_path: str) -> Path:
+    base = Path(getattr(sys, "_MEIPASS", APP_DIR))
+    return base / relative_path
+
+
 def app_state_dir() -> Path:
-    if getattr(sys, "frozen", False) and os.name == "nt":
-        local_app_data = os.environ.get("LOCALAPPDATA")
-        if local_app_data:
-            return Path(local_app_data) / APP_TITLE
     return APP_DIR
 
 
 STATE_DIR = app_state_dir()
+APP_ICON_PATH = resource_path("assets/tubedrop.ico")
+STATE_FILE = STATE_DIR / "tubedrop_state.json"
+HISTORY_THUMB_DIR = STATE_DIR / "history_thumbnails"
 SESSION_DIR = STATE_DIR / ".tubedrop_profile"
 COOKIE_FILE = SESSION_DIR / "youtube_cookies.txt"
 SECURE_BROWSER_ROOT = STATE_DIR / ".tubedrop_secure_browser"
@@ -74,7 +81,9 @@ YOUTUBE_HOME = "https://www.youtube.com/"
 TIKTOK_HOME = "https://www.tiktok.com/"
 INSTAGRAM_HOME = "https://www.instagram.com/"
 PINTEREST_HOME = "https://www.pinterest.com/"
-SUPPORTED_SITES_TEXT = "YouTube, TikTok, Instagram или Pinterest"
+TWITCH_HOME = "https://www.twitch.tv/"
+SUPPORTED_PLATFORMS = ["YouTube", "TikTok", "Instagram", "Pinterest", "Twitch"]
+SUPPORTED_SITES_TEXT = "YouTube, TikTok, Instagram, Pinterest или Twitch"
 
 BG = "#111111"
 PANEL = "#191919"
@@ -89,7 +98,6 @@ ACCENT_HOVER = "#16b894"
 BLUE = "#d4d4d4"
 DANGER = "#fb7185"
 WARN = "#f59e0b"
-LOG_BG = "#0d0d0d"
 
 FONT_STACK = "Segoe UI"
 DEFAULT_OUTPUT_TEMPLATE = "%(title).180B [%(id)s].%(ext)s"
@@ -105,6 +113,8 @@ MEDIA_EXTENSIONS = {
     ".flac",
     ".opus",
 }
+THUMBNAIL_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+MAX_HISTORY_ITEMS = 120
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 MERGED_MP4_VIDEO_AUDIO_FORMAT = (
     "bv[vcodec^=avc1]+ba[acodec^=mp4a]/"
@@ -149,6 +159,8 @@ def platform_label_for_url(url: str) -> str:
         return "Instagram"
     if host == "pin.it" or host.endswith(".pin.it") or host.startswith("pinterest.") or ".pinterest." in host:
         return "Pinterest"
+    if "twitch.tv" in host:
+        return "Twitch"
     if "youtu.be" in host or "youtube.com" in host:
         return "YouTube"
     return "сайт"
@@ -162,6 +174,8 @@ def platform_home_for_url(url: str) -> str:
         return INSTAGRAM_HOME
     if host == "pin.it" or host.endswith(".pin.it") or host.startswith("pinterest.") or ".pinterest." in host:
         return PINTEREST_HOME
+    if "twitch.tv" in host:
+        return TWITCH_HOME
     return YOUTUBE_HOME
 
 
@@ -281,8 +295,34 @@ def default_download_dir() -> Path:
 
 
 def ensure_session_dir() -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
     SESSION_DIR.mkdir(parents=True, exist_ok=True)
     SECURE_BROWSER_ROOT.mkdir(parents=True, exist_ok=True)
+
+
+def default_app_state() -> dict[str, Any]:
+    return {"settings": {}, "history": []}
+
+
+def load_app_state() -> dict[str, Any]:
+    if not STATE_FILE.exists():
+        return default_app_state()
+    try:
+        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default_app_state()
+    if not isinstance(data, dict):
+        return default_app_state()
+    settings = data.get("settings") if isinstance(data.get("settings"), dict) else {}
+    history = data.get("history") if isinstance(data.get("history"), list) else []
+    return {"settings": settings, "history": history}
+
+
+def save_app_state(state: dict[str, Any]) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    temp = STATE_FILE.with_suffix(".tmp")
+    temp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp.replace(STATE_FILE)
 
 
 def installed_chromium_browsers() -> list[tuple[str, str, Path]]:
@@ -359,6 +399,14 @@ def secure_session_available() -> bool:
         profile / "Default" / "Network" / "Cookies",
     ]
     return profile.exists() and any(path.exists() for path in cookie_locations)
+
+
+def cookie_file_available() -> bool:
+    return COOKIE_FILE.exists() and COOKIE_FILE.stat().st_size > 60
+
+
+def platform_prefers_login_before_fetch(url: str) -> bool:
+    return platform_label_for_url(url) == "Instagram" and not (cookie_file_available() or secure_session_available())
 
 
 def js_runtime_options() -> dict[str, dict[str, str]]:
@@ -459,6 +507,150 @@ def find_new_media_file(folder: Path, started_at: float) -> Path | None:
     return max(candidates, key=lambda item: item.stat().st_mtime)
 
 
+def find_download_thumbnail(folder: Path, media_path: Path | None, started_at: float) -> Path | None:
+    exact_candidates: list[Path] = []
+    if media_path:
+        for suffix in THUMBNAIL_EXTENSIONS:
+            candidate = media_path.with_suffix(suffix)
+            if candidate.exists():
+                exact_candidates.append(candidate)
+    if exact_candidates:
+        return max(exact_candidates, key=lambda item: item.stat().st_mtime)
+
+    recent_candidates: list[Path] = []
+    try:
+        for path in folder.iterdir():
+            if not path.is_file() or path.suffix.lower() not in THUMBNAIL_EXTENSIONS:
+                continue
+            try:
+                if path.stat().st_mtime >= started_at - 10:
+                    recent_candidates.append(path)
+            except OSError:
+                continue
+    except OSError:
+        return None
+    if not recent_candidates:
+        return None
+    return max(recent_candidates, key=lambda item: item.stat().st_mtime)
+
+
+PLATFORM_ICON_SVGS = {
+    "YouTube": """
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+          <rect x="6" y="14" width="52" height="36" rx="11" fill="#ff0033"/>
+          <path d="M28 24v16l15-8z" fill="#fff"/>
+        </svg>
+    """,
+    "TikTok": """
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+          <path d="M36 8h9c1 8 5 13 13 15v9c-5 0-10-2-14-5v17c0 10-8 17-18 17S8 54 8 44s8-17 18-17c2 0 4 0 6 1v10c-2-1-4-2-6-2-5 0-8 4-8 8s3 8 8 8 8-3 8-8V8z" fill="#fff"/>
+          <path d="M32 28v10c-2-1-4-2-6-2-5 0-8 4-8 8 0 2 1 5 3 6-5-1-9-6-9-12 0-7 6-13 14-13 2 0 4 1 6 3z" fill="#25f4ee"/>
+          <path d="M45 8c1 8 5 13 13 15v6c-8-1-14-6-17-13h-5V8z" fill="#fe2c55"/>
+        </svg>
+    """,
+    "Instagram": """
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+          <defs>
+            <linearGradient id="g" x1="10" y1="56" x2="56" y2="8" gradientUnits="userSpaceOnUse">
+              <stop offset="0" stop-color="#feda75"/>
+              <stop offset=".35" stop-color="#fa7e1e"/>
+              <stop offset=".65" stop-color="#d62976"/>
+              <stop offset="1" stop-color="#4f5bd5"/>
+            </linearGradient>
+          </defs>
+          <rect x="8" y="8" width="48" height="48" rx="14" fill="url(#g)"/>
+          <rect x="19" y="19" width="26" height="26" rx="8" fill="none" stroke="#fff" stroke-width="4"/>
+          <circle cx="32" cy="32" r="7" fill="none" stroke="#fff" stroke-width="4"/>
+          <circle cx="43" cy="21" r="3" fill="#fff"/>
+        </svg>
+    """,
+    "Pinterest": """
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+          <circle cx="32" cy="32" r="28" fill="#e60023"/>
+          <path d="M30 44c-2-1-4-2-5-4l-3 12c0 2-3 2-3 0l-1-1c1-6 3-12 4-18-1-2-1-4-1-6 0-8 6-14 14-14 7 0 12 5 12 12 0 9-5 17-12 17-3 0-5-2-5-5l1-4c1 2 2 3 4 3 4 0 7-5 7-11 0-4-3-7-8-7-6 0-9 4-9 9 0 2 1 4 2 5l-1 4c-3-1-5-5-5-9 0-7 6-13 15-13 8 0 14 5 14 12 0 9-6 17-14 17-3 0-5-1-6-3z" fill="#fff"/>
+        </svg>
+    """,
+    "Twitch": """
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+          <path d="M13 8h43v30L43 51H32l-8 8h-8v-8H8V19z" fill="#9146ff"/>
+          <path d="M18 14v29h10v8l8-8h12l8-8V14z" fill="#fff"/>
+          <path d="M42 23h5v13h-5zm-13 0h5v13h-5z" fill="#9146ff"/>
+        </svg>
+    """,
+}
+
+
+def platform_icon_svg(platform: str) -> str:
+    return PLATFORM_ICON_SVGS.get(platform, PLATFORM_ICON_SVGS["YouTube"])
+
+
+def render_svg_icon(painter: QPainter, svg: str, rect: QRectF) -> None:
+    renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    renderer.render(painter, rect)
+
+
+def app_icon() -> QIcon:
+    return QIcon(str(APP_ICON_PATH)) if APP_ICON_PATH.exists() else QIcon()
+
+
+def set_windows_app_user_model_id() -> None:
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        app_id = f"{APP_TITLE}.Desktop"
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+    except Exception:
+        pass
+
+
+def reveal_in_file_manager(file_path: Path | None, folder_path: Path | None = None) -> None:
+    if os.name == "nt" and file_path and file_path.exists():
+        resolved_file = file_path.resolve()
+        subprocess.Popen(f'explorer.exe /select,"{resolved_file}"')
+        return
+    target = folder_path if folder_path and folder_path.exists() else None
+    if not target and file_path and file_path.parent.exists():
+        target = file_path.parent
+    if target:
+        os.startfile(str(target.resolve()))  # type: ignore[attr-defined]
+
+
+def format_history_time(timestamp: float | int | None) -> str:
+    try:
+        value = float(timestamp or 0)
+    except (TypeError, ValueError):
+        value = 0
+    if value <= 0:
+        return ""
+    return time.strftime("%d.%m.%Y %H:%M", time.localtime(value))
+
+
+def clean_history_items(items: list[Any]) -> list[dict[str, Any]]:
+    cleaned: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        file_path = str(item.get("file") or "")
+        folder = str(item.get("folder") or "")
+        if not file_path and not folder:
+            continue
+        cleaned.append(
+            {
+                "id": str(item.get("id") or int(time.time() * 1000)),
+                "title": str(item.get("title") or Path(file_path).stem or "Без названия"),
+                "url": str(item.get("url") or ""),
+                "platform": str(item.get("platform") or platform_label_for_url(str(item.get("url") or ""))),
+                "file": file_path,
+                "folder": folder or str(Path(file_path).parent),
+                "thumbnail": str(item.get("thumbnail") or ""),
+                "downloaded_at": item.get("downloaded_at") or 0,
+            }
+        )
+    return cleaned[:MAX_HISTORY_ITEMS]
+
+
 def pil_to_pixmap(image: Image.Image) -> QPixmap:
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
@@ -471,6 +663,14 @@ def make_preview(image: Image.Image, width: int = 320, height: int = 180) -> QPi
     source = image.convert("RGB")
     canvas = ImageOps.fit(source, (width, height), method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
     return pil_to_pixmap(canvas)
+
+
+def thumbnail_pixmap_from_file(path: Path, width: int, height: int) -> QPixmap:
+    try:
+        image = Image.open(path).convert("RGB")
+        return make_preview(image, width=width, height=height)
+    except Exception:
+        return QPixmap()
 
 
 def is_requested_format_unavailable(exc: Exception) -> bool:
@@ -600,6 +800,173 @@ class PreviewBox(QFrame):
             painter.drawText(self.rect(), Qt.AlignCenter, self._text)
 
 
+class HistoryPreview(QFrame):
+    def __init__(
+        self,
+        platform: str,
+        thumbnail: Path | None = None,
+        on_delete: Any | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.platform = platform
+        self.on_delete = on_delete
+        self.delete_hovered = False
+        self._pixmap = thumbnail_pixmap_from_file(thumbnail, 166, 94) if thumbnail else QPixmap()
+        self.setObjectName("HistoryPreview")
+        self.setFixedSize(166, 94)
+        self.setMouseTracking(True)
+
+    def delete_rect(self) -> QRectF:
+        return QRectF(self.width() - 37, 7, 28, 28)
+
+    def enterEvent(self, event) -> None:  # noqa: ANN001 - Qt event type differs by binding version
+        self.update_delete_hover(event.position())
+        super().enterEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: ANN001 - Qt event type differs by binding version
+        self.update_delete_hover(event.position())
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: ANN001 - Qt event type differs by binding version
+        if self.delete_hovered:
+            self.delete_hovered = False
+            self.unsetCursor()
+            self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event) -> None:  # noqa: ANN001 - Qt event type differs by binding version
+        if event.button() == Qt.LeftButton and self.delete_rect().contains(event.position()):
+            if self.on_delete:
+                self.on_delete()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def update_delete_hover(self, position: QPointF) -> None:
+        hovered = self.delete_rect().contains(position)
+        if hovered == self.delete_hovered:
+            return
+        self.delete_hovered = hovered
+        if hovered:
+            self.setCursor(Qt.PointingHandCursor)
+        else:
+            self.unsetCursor()
+        self.update()
+
+    def draw_trash(self, painter: QPainter, rect: QRectF) -> None:
+        icon_color = QColor("#ef4444" if self.delete_hovered else "#ffffff")
+        icon_color.setAlpha(245 if self.delete_hovered else 150)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 80 if self.delete_hovered else 45))
+        painter.drawRoundedRect(rect, 11, 11)
+
+        pen = QPen(icon_color, 1.8)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+        cx = rect.center().x()
+        top = rect.top() + 8
+        painter.drawLine(QPointF(cx - 7, top + 2), QPointF(cx + 7, top + 2))
+        painter.drawLine(QPointF(cx - 4, top), QPointF(cx + 4, top))
+        body = QRectF(cx - 6, top + 5, 12, 12)
+        painter.drawRoundedRect(body, 2, 2)
+        painter.drawLine(QPointF(cx - 2.5, top + 8), QPointF(cx - 2.5, top + 14))
+        painter.drawLine(QPointF(cx + 2.5, top + 8), QPointF(cx + 2.5, top + 14))
+
+    def paintEvent(self, event) -> None:  # noqa: ARG002, ANN001 - custom clipped preview painter
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+
+        path = QPainterPath()
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path.addRoundedRect(rect, 10, 10)
+        painter.fillPath(path, QColor("#0b0b0b"))
+        painter.setClipPath(path)
+
+        if not self._pixmap.isNull():
+            scaled = self._pixmap.scaled(self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+            left = (self.width() - scaled.width()) // 2
+            top = (self.height() - scaled.height()) // 2
+            painter.drawPixmap(left, top, scaled)
+        else:
+            painter.setPen(QColor(SUBTLE))
+            font = QFont(FONT_STACK, 12)
+            font.setWeight(QFont.Weight.DemiBold)
+            painter.setFont(font)
+            painter.drawText(self.rect(), Qt.AlignCenter, self.platform)
+
+        painter.setClipping(False)
+        icon_rect = QRectF(9, 8, 28, 28)
+        render_svg_icon(painter, platform_icon_svg(self.platform), icon_rect)
+        self.draw_trash(painter, self.delete_rect())
+
+
+class HistoryCard(QFrame):
+    def __init__(
+        self,
+        item: dict[str, Any],
+        on_open_file: Any,
+        on_open_folder: Any,
+        on_delete: Any,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.item = item
+        self.on_open_file = on_open_file
+        self.on_open_folder = on_open_folder
+        self.on_delete = on_delete
+        self.setObjectName("HistoryCard")
+        self.setFixedSize(188, 222)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(7)
+
+        thumbnail = Path(str(item.get("thumbnail") or "")) if item.get("thumbnail") else None
+        if thumbnail and not thumbnail.exists():
+            thumbnail = None
+        platform = str(item.get("platform") or "сайт")
+        item_id = str(item.get("id") or "")
+        layout.addWidget(HistoryPreview(platform, thumbnail, lambda: self.on_delete(item_id)), 0, Qt.AlignCenter)
+
+        title = QLabel(str(item.get("title") or "Без названия"))
+        title.setObjectName("HistoryTitle")
+        title.setWordWrap(True)
+        title.setMaximumHeight(38)
+        title.setToolTip(title.text())
+        layout.addWidget(title)
+
+        downloaded_at = format_history_time(item.get("downloaded_at"))
+        meta = QLabel(downloaded_at or platform)
+        meta.setObjectName("HistoryMeta")
+        meta.setToolTip(str(item.get("file") or ""))
+        layout.addWidget(meta)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(6)
+        file_text = str(item.get("file") or "")
+        folder_text = str(item.get("folder") or "")
+        file_path = Path(file_text) if file_text else Path("__missing_file__")
+        folder_path = Path(folder_text) if folder_text else Path("__missing_folder__")
+
+        file_btn = QPushButton("Открыть")
+        file_btn.setObjectName("HistoryButton")
+        file_btn.setToolTip("Открыть файл")
+        file_btn.setEnabled(file_path.exists())
+        file_btn.clicked.connect(lambda: self.on_open_file(file_path))
+        actions.addWidget(file_btn, 1)
+
+        folder_btn = QPushButton("Папка")
+        folder_btn.setObjectName("HistoryButton")
+        folder_btn.setToolTip("Открыть папку")
+        folder_btn.setEnabled(folder_path.exists() or (bool(file_text) and file_path.parent.exists()))
+        folder_btn.clicked.connect(lambda: self.on_open_folder(folder_path, file_path))
+        actions.addWidget(folder_btn, 1)
+        layout.addLayout(actions)
+
+
 class StatusDot(QWidget):
     COLORS = {
         "ok": ACCENT,
@@ -656,16 +1023,16 @@ class ModernComboBox(QComboBox):
             }}
             QScrollBar:vertical {{
                 background: transparent;
-                width: 8px;
-                margin: 6px 2px 6px 0;
+                width: 12px;
+                margin: 8px 3px 8px 3px;
             }}
             QScrollBar::handle:vertical {{
-                background: #505050;
-                min-height: 28px;
-                border-radius: 4px;
+                background: #585858;
+                min-height: 38px;
+                border-radius: 6px;
             }}
             QScrollBar::handle:vertical:hover {{
-                background: #626262;
+                background: #767676;
             }}
             QScrollBar::add-line:vertical,
             QScrollBar::sub-line:vertical,
@@ -739,6 +1106,20 @@ class WindowControlButton(QPushButton):
         painter.drawText(self.rect(), Qt.AlignCenter, self.symbol)
 
 
+class PlatformIcon(QWidget):
+    def __init__(self, platform: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.platform = platform
+        self.setFixedSize(22, 22)
+        self.setToolTip(platform)
+
+    def paintEvent(self, event) -> None:  # noqa: ARG002, ANN001 - custom SVG icon painter
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        render_svg_icon(painter, platform_icon_svg(self.platform), QRectF(1, 1, self.width() - 2, self.height() - 2))
+
+
 class TitleBar(QFrame):
     def __init__(
         self,
@@ -771,6 +1152,13 @@ class TitleBar(QFrame):
         title.setObjectName("WindowTitle")
         brand.addWidget(title)
         layout.addLayout(brand, 1)
+
+        source_row = QHBoxLayout()
+        source_row.setContentsMargins(0, 0, 4, 0)
+        source_row.setSpacing(7)
+        for platform in SUPPORTED_PLATFORMS:
+            source_row.addWidget(PlatformIcon(platform))
+        layout.addLayout(source_row)
 
         for dot, label in ((auth_dot, auth_label), (status_dot, status_label)):
             chip = QFrame()
@@ -932,8 +1320,8 @@ class AuthDialog(BorderlessDialog):
             return
         browser_id, label, _path = browser
         SECURE_BROWSER_CHOICE.write_text(browser_id, encoding="utf-8")
-        self.update_state(f"Сессия {label} отмечена. TubeDrop сохранит cookie и повторит запрос.")
-        QTimer.singleShot(500, self.complete_secure_login)
+        self.update_state(f"Сессия {label} отмечена. Жду сохранения cookies и повторю запрос.")
+        QTimer.singleShot(1800, self.complete_secure_login)
 
     def complete_secure_login(self) -> None:
         self.session_saved.emit(1)
@@ -1041,7 +1429,7 @@ class SuccessDialog(BorderlessDialog):
         self.accept()
 
     def open_folder(self) -> None:
-        os.startfile(str(self.folder))  # type: ignore[attr-defined]
+        reveal_in_file_manager(self.file_path, self.folder)
         self.accept()
 
 
@@ -1109,7 +1497,14 @@ class TubeDropApp(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         ensure_session_dir()
+        self.app_state = load_app_state()
+        self.settings = self.app_state.get("settings", {})
+        self.download_history = clean_history_items(self.app_state.get("history", []))
+        self._loading_settings = True
         self.setWindowTitle(APP_TITLE)
+        icon = app_icon()
+        if not icon.isNull():
+            self.setWindowIcon(icon)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window | Qt.NoDropShadowWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setFixedSize(980, 680)
@@ -1117,23 +1512,31 @@ class TubeDropApp(QMainWindow):
 
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.info: dict[str, Any] | None = None
+        self.info_url = ""
+        self.is_busy = False
         self.choices: list[DownloadChoice] = []
         self.worker: threading.Thread | None = None
         self.auth_dialog: AuthDialog | None = None
         self.cancel_requested = threading.Event()
         self.pending_retry = "fetch"
         self.pending_download_choice: DownloadChoice | None = None
+        self.current_thumbnail_image: Image.Image | None = None
+        self.recent_messages: list[str] = []
+        self.preferred_quality_label = str(self.settings.get("quality_label") or "")
 
         self.url_input = QLineEdit()
-        self.url_input.setPlaceholderText("Ссылка на YouTube, TikTok, Instagram или Pinterest")
-        self.url_input.returnPressed.connect(self.fetch_info)
+        self.url_input.setPlaceholderText("Вставьте ссылку...")
+        self.url_input.returnPressed.connect(self.primary_action)
 
-        self.folder_input = QLineEdit(str(default_download_dir()))
+        self.folder_input = QLineEdit(str(self.settings.get("folder") or default_download_dir()))
         self.filename_input = QLineEdit()
         self.filename_input.setPlaceholderText("Введите название")
+        self.filename_input.setText(str(self.settings.get("filename") or ""))
         self.quality_combo = ModernComboBox()
         self.recode_check = QCheckBox("MP4 для Vegas")
+        self.recode_check.setChecked(bool(self.settings.get("recode_for_vegas", False)))
         self.playlist_check = QCheckBox("Плейлист целиком")
+        self.playlist_check.setChecked(bool(self.settings.get("playlist_whole", False)))
 
         self.auth_status_dot = StatusDot("idle")
         self.auth_status_label = QLabel("Вход: не проверен")
@@ -1142,15 +1545,18 @@ class TubeDropApp(QMainWindow):
         self.preview_label = PreviewBox("Превью")
         self.title_label = QLabel("Ссылка не выбрана")
         self.meta_label = QLabel("Ожидание данных")
-        self.log = QPlainTextEdit()
         self.progress = QProgressBar()
         self.progress_label = QLabel("Ожидание")
         self.prepare_progress = QProgressBar()
         self.prepare_label = QLabel("Подготовка файла")
-        self.download_btn = QPushButton("Скачать")
+        self.download_btn = QPushButton("Получить")
         self.cancel_btn = QPushButton("Отмена")
 
         self.build_ui()
+        self.connect_settings_signals()
+        self._loading_settings = False
+        self.refresh_history()
+        self.update_primary_action()
         self.update_auth_status("Вход: сохранён" if secure_session_available() else "Вход: не проверен", "ok" if secure_session_available() else "idle")
         self.poll_timer = QTimer(self)
         self.poll_timer.timeout.connect(self.poll_events)
@@ -1192,11 +1598,6 @@ class TubeDropApp(QMainWindow):
         check_btn.clicked.connect(lambda: self.open_auth_dialog("fetch"))
         url_layout.addWidget(check_btn)
 
-        fetch_btn = QPushButton("Получить")
-        fetch_btn.setObjectName("PrimaryButton")
-        fetch_btn.clicked.connect(self.fetch_info)
-        self.fetch_btn = fetch_btn
-        url_layout.addWidget(fetch_btn)
         main.addWidget(url_card)
 
         body = QHBoxLayout()
@@ -1230,27 +1631,35 @@ class TubeDropApp(QMainWindow):
         media_layout.addLayout(info_col, 1)
         content_col.addWidget(media_panel)
 
-        log_panel = QFrame()
-        log_panel.setObjectName("Card")
-        log_layout = QVBoxLayout(log_panel)
-        log_layout.setContentsMargins(12, 10, 12, 12)
-        log_layout.setSpacing(8)
+        history_panel = QFrame()
+        history_panel.setObjectName("Card")
+        history_layout = QVBoxLayout(history_panel)
+        history_layout.setContentsMargins(12, 10, 12, 12)
+        history_layout.setSpacing(8)
 
-        log_header = QHBoxLayout()
-        log_title = QLabel("Журнал")
-        log_title.setObjectName("SectionTitle")
-        log_header.addWidget(log_title)
-        clear_btn = QPushButton("Очистить")
-        clear_btn.setObjectName("FlatButton")
-        clear_btn.clicked.connect(self.log.clear)
-        log_header.addWidget(clear_btn)
-        log_layout.addLayout(log_header)
+        history_header = QHBoxLayout()
+        history_title = QLabel("История скачиваний")
+        history_title.setObjectName("SectionTitle")
+        history_header.addWidget(history_title)
+        history_header.addStretch(1)
+        history_layout.addLayout(history_header)
 
-        self.log.setObjectName("LogBox")
-        self.log.setReadOnly(True)
-        self.log.setMaximumBlockCount(500)
-        log_layout.addWidget(self.log, 1)
-        content_col.addWidget(log_panel, 1)
+        self.history_scroll = QScrollArea()
+        self.history_scroll.setObjectName("HistoryScroll")
+        self.history_scroll.setFrameShape(QFrame.NoFrame)
+        self.history_scroll.setWidgetResizable(True)
+        self.history_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.history_viewport = QWidget()
+        self.history_viewport.setObjectName("HistoryViewport")
+        self.history_grid = QGridLayout(self.history_viewport)
+        self.history_grid.setContentsMargins(0, 0, 4, 0)
+        self.history_grid.setHorizontalSpacing(8)
+        self.history_grid.setVerticalSpacing(8)
+        for column in range(3):
+            self.history_grid.setColumnStretch(column, 1)
+        self.history_scroll.setWidget(self.history_viewport)
+        history_layout.addWidget(self.history_scroll, 1)
+        content_col.addWidget(history_panel, 1)
 
         right = QFrame()
         right.setObjectName("Card")
@@ -1326,7 +1735,7 @@ class TubeDropApp(QMainWindow):
         actions.addWidget(self.cancel_btn)
 
         self.download_btn.setObjectName("PrimaryButton")
-        self.download_btn.clicked.connect(self.download)
+        self.download_btn.clicked.connect(self.primary_action)
         self.download_btn.setEnabled(False)
         actions.addWidget(self.download_btn)
         right_layout.addLayout(actions)
@@ -1338,6 +1747,10 @@ class TubeDropApp(QMainWindow):
     def resizeEvent(self, event) -> None:  # noqa: ANN001 - Qt event type differs by binding version
         super().resizeEvent(event)
 
+    def closeEvent(self, event) -> None:  # noqa: ANN001 - Qt event type differs by binding version
+        self.save_current_settings()
+        super().closeEvent(event)
+
     def add_labeled(self, layout: QVBoxLayout, label: str, widget_or_layout: QWidget | QHBoxLayout) -> None:
         text = QLabel(label)
         text.setObjectName("FieldLabel")
@@ -1346,6 +1759,172 @@ class TubeDropApp(QMainWindow):
             layout.addLayout(widget_or_layout)
         else:
             layout.addWidget(widget_or_layout)
+
+    def connect_settings_signals(self) -> None:
+        self.url_input.textChanged.connect(self.on_url_changed)
+        self.folder_input.textChanged.connect(self.save_current_settings)
+        self.filename_input.textChanged.connect(self.save_current_settings)
+        self.quality_combo.currentTextChanged.connect(self.save_current_settings)
+        self.recode_check.toggled.connect(self.save_current_settings)
+        self.playlist_check.toggled.connect(self.save_current_settings)
+
+    def current_url(self) -> str:
+        return normalize_url(self.url_input.text())
+
+    def info_matches_current_url(self) -> bool:
+        current = self.current_url()
+        return bool(current and self.info and self.info_url == current)
+
+    def update_primary_action(self) -> None:
+        if self.is_busy:
+            self.download_btn.setEnabled(False)
+            return
+        if self.info_matches_current_url():
+            self.download_btn.setText("Скачать")
+            self.download_btn.setEnabled(True)
+            return
+        self.download_btn.setText("Получить")
+        self.download_btn.setEnabled(bool(self.current_url()))
+
+    def on_url_changed(self, text: str) -> None:
+        current = normalize_url(text)
+        if current != self.info_url:
+            self.info = None
+            self.choices = []
+            self.quality_combo.blockSignals(True)
+            self.quality_combo.clear()
+            self.quality_combo.blockSignals(False)
+            self.pending_download_choice = None
+            self.current_thumbnail_image = None
+            self.preview_label.setPixmap(QPixmap())
+            if current:
+                self.title_label.setText("Ссылка вставлена")
+                self.meta_label.setText("Нажмите «Получить», чтобы загрузить форматы.")
+                self.progress_label.setText("Ссылка готова к проверке.")
+            else:
+                self.title_label.setText("Ссылка не выбрана")
+                self.meta_label.setText("Ожидание данных")
+                self.progress_label.setText("Ожидание")
+        self.update_primary_action()
+
+    def primary_action(self) -> None:
+        if self.is_busy:
+            return
+        if self.info_matches_current_url():
+            self.download()
+            return
+        self.fetch_info()
+
+    def save_current_settings(self, *args: Any) -> None:  # noqa: ARG002 - Qt passes signal payloads
+        if self._loading_settings:
+            return
+        self.settings = {
+            "folder": self.folder_input.text().strip(),
+            "filename": self.filename_input.text().strip(),
+            "quality_label": self.quality_combo.currentText().strip(),
+            "recode_for_vegas": self.recode_check.isChecked(),
+            "playlist_whole": self.playlist_check.isChecked(),
+        }
+        self.preferred_quality_label = self.settings["quality_label"]
+        self.app_state["settings"] = self.settings
+        self.persist_app_state()
+
+    def persist_app_state(self) -> None:
+        self.app_state["history"] = self.download_history[:MAX_HISTORY_ITEMS]
+        try:
+            save_app_state(self.app_state)
+        except OSError as exc:
+            self.recent_messages.append(f"[!] Не удалось сохранить настройки: {exc}")
+
+    def clear_grid_layout(self, layout: QGridLayout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+
+    def refresh_history(self) -> None:
+        self.clear_grid_layout(self.history_grid)
+        if not self.download_history:
+            empty_label = QLabel("История пока пустая")
+            empty_label.setObjectName("HistoryEmpty")
+            empty_label.setAlignment(Qt.AlignCenter)
+            self.history_grid.addWidget(empty_label, 0, 0, 1, 3)
+            return
+
+        for index, item in enumerate(self.download_history[:MAX_HISTORY_ITEMS]):
+            row = index // 3
+            column = index % 3
+            card = HistoryCard(item, self.open_history_file, self.open_history_folder, self.remove_history_item)
+            self.history_grid.addWidget(card, row, column, Qt.AlignTop | Qt.AlignHCenter)
+
+    def remove_history_item(self, item_id: str) -> None:
+        for entry in self.download_history:
+            if str(entry.get("id") or "") != item_id:
+                continue
+            thumbnail_text = str(entry.get("thumbnail") or "")
+            if thumbnail_text:
+                thumbnail = Path(thumbnail_text)
+                try:
+                    if thumbnail.exists() and thumbnail.resolve().parent == HISTORY_THUMB_DIR.resolve():
+                        thumbnail.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            break
+        self.download_history = [entry for entry in self.download_history if str(entry.get("id") or "") != item_id]
+        self.persist_app_state()
+        self.refresh_history()
+
+    def open_history_file(self, file_path: Path) -> None:
+        if not file_path.exists():
+            show_app_message(self, "Файл не найден", "Этот файл уже удален или перемещен.", "info")
+            self.refresh_history()
+            return
+        os.startfile(str(file_path))  # type: ignore[attr-defined]
+
+    def open_history_folder(self, folder_path: Path, file_path: Path) -> None:
+        target = folder_path if folder_path.exists() else file_path.parent
+        if not file_path.exists() and not target.exists():
+            show_app_message(self, "Папка не найдена", "Папка уже удалена или перемещена.", "info")
+            self.refresh_history()
+            return
+        reveal_in_file_manager(file_path if file_path.exists() else None, target)
+
+    def save_current_thumbnail_for_history(self, item_id: str) -> str:
+        if not self.current_thumbnail_image:
+            return ""
+        try:
+            HISTORY_THUMB_DIR.mkdir(parents=True, exist_ok=True)
+            target = HISTORY_THUMB_DIR / f"{item_id}.png"
+            image = self.current_thumbnail_image.copy().convert("RGB")
+            image.thumbnail((640, 360), Image.Resampling.LANCZOS)
+            image.save(target, format="PNG")
+            return str(target)
+        except OSError:
+            return ""
+
+    def add_history_entry(self, folder: Path, file_path: Path | None, thumbnail_path: str = "") -> None:
+        if not file_path:
+            return
+        info = self.info or {}
+        url = str(info.get("webpage_url") or info.get("original_url") or self.url_input.text().strip())
+        title = str(info.get("title") or file_path.stem or "Без названия")
+        item_id = str(int(time.time() * 1000))
+        thumbnail = thumbnail_path if thumbnail_path and Path(thumbnail_path).exists() else self.save_current_thumbnail_for_history(item_id)
+        item = {
+            "id": item_id,
+            "title": title,
+            "url": url,
+            "platform": platform_label_for_url(url),
+            "file": str(file_path),
+            "folder": str(folder),
+            "thumbnail": thumbnail,
+            "downloaded_at": int(time.time()),
+        }
+        existing = [entry for entry in self.download_history if str(entry.get("file") or "") != str(file_path)]
+        self.download_history = [item, *existing][:MAX_HISTORY_ITEMS]
+        self.persist_app_state()
+        self.refresh_history()
 
     def paste_url(self) -> None:
         text = QApplication.clipboard().text().strip()
@@ -1387,26 +1966,36 @@ class TubeDropApp(QMainWindow):
     def on_session_saved(self, count: int) -> None:
         platform_label = platform_label_for_url(self.url_input.text().strip())
         self.log_message(f"Безопасная сессия {platform_label} сохранена.")
-        if self.refresh_cookie_file_from_secure_browser():
-            self.progress_label.setText(f"Сессия {platform_label} сохранена. Повторяю запрос...")
-        else:
-            self.progress_label.setText("Сессия отмечена. Пробую повторить запрос...")
-        self.update_auth_status("Вход: выполнен", "ok")
-        if self.pending_retry == "download" and self.info:
-            QTimer.singleShot(300, self.download)
-        else:
-            QTimer.singleShot(300, self.fetch_info)
+        retry = self.pending_retry
+        self.progress_label.setText(f"Сохраняю сессию {platform_label}...")
+        self.update_auth_status("Вход: сохранение", "idle")
+        self.set_busy(True, "Вход")
+        threading.Thread(target=self.session_refresh_worker, args=(retry,), daemon=True).start()
+
+    def session_refresh_worker(self, retry: str) -> None:
+        refreshed = self.refresh_cookie_file_from_secure_browser(attempts=10, delay=0.8)
+        self.events.put(("session_ready", {"retry": retry, "refreshed": refreshed}))
 
     def update_auth_status(self, text: str, state: str = "idle") -> None:
         self.auth_status_label.setText(text)
         self.auth_status_dot.set_state(state)
 
     def set_busy(self, busy: bool, status: str, can_cancel: bool = False) -> None:
+        self.is_busy = busy
         self.status_label.setText(status)
         self.status_dot.set_state("busy" if busy else "ok")
-        self.fetch_btn.setEnabled(not busy)
-        self.download_btn.setEnabled((not busy) and bool(self.info))
         self.cancel_btn.setEnabled(bool(busy and can_cancel))
+        if busy:
+            if can_cancel:
+                label = "Скачиваю..."
+            elif status == "Вход":
+                label = "Сохраняю..."
+            else:
+                label = "Получаю..."
+            self.download_btn.setText(label)
+            self.download_btn.setEnabled(False)
+        else:
+            self.update_primary_action()
 
     def cancel_download(self) -> None:
         if not self.worker or not self.worker.is_alive():
@@ -1425,6 +2014,15 @@ class TubeDropApp(QMainWindow):
         if url != self.url_input.text().strip():
             self.url_input.setText(url)
         if self.worker and self.worker.is_alive():
+            return
+        if platform_prefers_login_before_fetch(url):
+            platform_label = platform_label_for_url(url)
+            self.pending_retry = "fetch"
+            self.update_auth_status("Вход: нужен", "warn")
+            self.progress.setRange(0, 100)
+            self.progress.setValue(0)
+            self.progress_label.setText(f"Для {platform_label} нужен вход. Открываю безопасный вход...")
+            self.open_auth_dialog("fetch")
             return
         self.clear_log()
         self.update_auth_status("Вход: проверка", "idle")
@@ -1469,7 +2067,7 @@ class TubeDropApp(QMainWindow):
                     )
                 )
                 return
-            self.events.put(("info", info))
+            self.events.put(("info", {"url": url, "info": info}))
         except Exception as exc:  # noqa: BLE001 - shown to user
             message = self.friendly_error("Не удалось получить данные", exc, platform_label_for_url(url))
             if self.needs_in_app_session(exc):
@@ -1477,36 +2075,43 @@ class TubeDropApp(QMainWindow):
             else:
                 self.events.put(("error", message))
 
-    def refresh_cookie_file_from_secure_browser(self) -> bool:
+    def refresh_cookie_file_from_secure_browser(self, attempts: int = 1, delay: float = 0.0) -> bool:
         browser = secure_browser_choice()
-        if browser:
-            browser_id, label, _path = browser
-            profile = secure_browser_profile_dir(browser_id)
+        if not browser:
+            return False
+        browser_id, label, _path = browser
+        profile = secure_browser_profile_dir(browser_id)
+        last_error = ""
+        total_attempts = max(1, attempts)
+        for attempt in range(total_attempts):
             if profile.exists():
                 try:
                     ensure_session_dir()
                     jar = extract_cookies_from_browser(browser_id, str(profile), YtdlpLogger(self.events))
-                    if not len(jar):
-                        self.events.put(("log", f"Профиль {label} пока не содержит cookies."))
-                        return False
-                    temp_cookie_file = COOKIE_FILE.with_suffix(".tmp")
-                    jar.save(str(temp_cookie_file), ignore_discard=True, ignore_expires=True)
-                    temp_cookie_file.replace(COOKIE_FILE)
-                    self.events.put(("log", f"Сессия TubeDrop обновлена из {label}."))
-                    return True
+                    if len(jar):
+                        temp_cookie_file = COOKIE_FILE.with_suffix(".tmp")
+                        jar.save(str(temp_cookie_file), ignore_discard=True, ignore_expires=True)
+                        temp_cookie_file.replace(COOKIE_FILE)
+                        self.events.put(("log", f"Сессия TubeDrop обновлена из {label}."))
+                        return True
+                    last_error = f"Профиль {label} пока не содержит cookies."
                 except Exception as exc:  # noqa: BLE001 - cookie refresh should not break fallback
-                    self.events.put(
-                        (
-                            "log",
-                            "Не удалось обновить cookies из браузера. "
-                            f"Если сервис снова попросит вход, закройте окно входа и повторите запрос. Подробности: {clean_yt_text(exc)}",
-                        )
-                    )
+                    last_error = clean_yt_text(exc)
+            if attempt < total_attempts - 1 and delay > 0:
+                time.sleep(delay)
+        if last_error:
+            self.events.put(
+                (
+                    "log",
+                    "Не удалось обновить cookies из браузера. "
+                    f"Если сервис снова попросит вход, закройте окно входа и повторите запрос. Подробности: {last_error}",
+                )
+            )
         return False
 
     def apply_cookie_options(self, options: dict[str, Any]) -> None:
         refreshed = self.refresh_cookie_file_from_secure_browser()
-        if COOKIE_FILE.exists() and COOKIE_FILE.stat().st_size > 60:
+        if cookie_file_available():
             options["cookiefile"] = str(COOKIE_FILE)
             if refreshed:
                 self.events.put(("log", "Использую свежую сохранённую сессию TubeDrop."))
@@ -1589,16 +2194,25 @@ class TubeDropApp(QMainWindow):
         )
         return choices
 
-    def show_info(self, info: dict[str, Any] | None) -> None:
+    def show_info(self, info: dict[str, Any] | None, source_url: str = "") -> None:
         if not info:
             self.events.put(("error", "yt-dlp не вернул сведения о видео."))
             return
 
         self.info = info
+        self.info_url = source_url or self.current_url()
         self.choices = self.build_choices(info)
+        self.quality_combo.blockSignals(True)
         self.quality_combo.clear()
         for choice in self.choices:
             self.quality_combo.addItem(choice.label)
+        if self.preferred_quality_label:
+            for index, choice in enumerate(self.choices):
+                if choice.label == self.preferred_quality_label:
+                    self.quality_combo.setCurrentIndex(index)
+                    break
+        self.quality_combo.blockSignals(False)
+        self.save_current_settings()
 
         title = info.get("title") or "Без названия"
         uploader = info.get("uploader") or info.get("channel") or "автор неизвестен"
@@ -1615,6 +2229,7 @@ class TubeDropApp(QMainWindow):
         else:
             self.update_auth_status("Вход: не нужен", "ok")
 
+        self.current_thumbnail_image = None
         thumb = info.get("thumbnail")
         if thumb:
             threading.Thread(target=self.load_thumbnail_worker, args=(thumb,), daemon=True).start()
@@ -1622,6 +2237,7 @@ class TubeDropApp(QMainWindow):
             self.preview_label.setPixmap(QPixmap())
             self.preview_label.setText("Превью недоступно")
         self.log_message("Сведения загружены. Выберите качество и папку.")
+        self.update_primary_action()
 
     def load_thumbnail_worker(self, url: str) -> None:
         try:
@@ -1783,12 +2399,14 @@ class TubeDropApp(QMainWindow):
                 self.events.put(("log", "Перекодирую видео в H.264/AAC MP4 для Vegas."))
                 final_file = make_vegas_compatible_mp4(final_file, ffmpeg)
                 self.events.put(("prepare_progress", (100, "MP4 для Vegas готов")))
+            thumbnail_file = find_download_thumbnail(folder, final_file, started_at)
             self.events.put(
                 (
                     "done",
                     {
                         "folder": str(folder),
                         "file": str(final_file) if final_file else "",
+                        "thumbnail": str(thumbnail_file) if thumbnail_file else "",
                     },
                 )
             )
@@ -1882,10 +2500,20 @@ class TubeDropApp(QMainWindow):
                 self.prepare_progress.setRange(0, 100)
                 self.prepare_progress.setValue(0)
                 self.prepare_label.setText("Подготовка файла")
-                self.show_info(payload if isinstance(payload, dict) else None)
+                source_url = ""
+                info_payload = payload if isinstance(payload, dict) else None
+                if isinstance(info_payload, dict) and "info" in info_payload:
+                    source_url = str(info_payload.get("url") or "")
+                    info_payload = info_payload.get("info") if isinstance(info_payload.get("info"), dict) else None
+                if source_url and source_url != self.current_url():
+                    self.set_busy(False, "Готово")
+                    self.progress_label.setText("Ссылка изменилась. Нажмите «Получить» для новой ссылки.")
+                    continue
+                self.show_info(info_payload if isinstance(info_payload, dict) else None, source_url)
                 self.set_busy(False, "Готово")
                 self.progress_label.setText("Выберите настройки и нажмите «Скачать».")
             elif event == "thumbnail" and isinstance(payload, Image.Image):
+                self.current_thumbnail_image = payload.copy()
                 width = max(1, self.preview_label.width() or 312)
                 height = max(1, self.preview_label.height() or 172)
                 pixmap = make_preview(payload, width=width, height=height)
@@ -1918,10 +2546,26 @@ class TubeDropApp(QMainWindow):
                 folder = Path(str(data.get("folder") or default_download_dir()))
                 file_text = str(data.get("file") or "")
                 file_path = Path(file_text) if file_text else None
+                thumbnail_path = str(data.get("thumbnail") or "")
                 self.progress_label.setText("Готово. Файл и превью сохранены.")
-                self.log_message(f"Готово. Папка: {folder}")
+                self.add_history_entry(folder, file_path, thumbnail_path)
                 self.set_busy(False, "Готово")
                 SuccessDialog(self, folder, file_path).exec()
+            elif event == "session_ready":
+                data = payload if isinstance(payload, dict) else {}
+                retry = str(data.get("retry") or "fetch")
+                refreshed = bool(data.get("refreshed"))
+                self.set_busy(False, "Готово")
+                if refreshed:
+                    self.update_auth_status("Вход: выполнен", "ok")
+                    self.progress_label.setText("Сессия сохранена. Повторяю запрос...")
+                else:
+                    self.update_auth_status("Вход: проверить", "warn")
+                    self.progress_label.setText("Сессия отмечена, но cookies пока не видны. Пробую запрос еще раз...")
+                if retry == "download" and self.info_matches_current_url():
+                    QTimer.singleShot(300, self.download)
+                else:
+                    QTimer.singleShot(300, self.fetch_info)
             elif event == "cancelled":
                 self.progress.setRange(0, 100)
                 self.progress.setValue(0)
@@ -1956,10 +2600,14 @@ class TubeDropApp(QMainWindow):
 
     def log_message(self, message: str, error: bool = False) -> None:
         prefix = "[!] " if error else ""
-        self.log.appendPlainText(prefix + message)
+        text = prefix + clean_yt_text(message)
+        self.recent_messages.append(text)
+        self.recent_messages = self.recent_messages[-120:]
+        if error:
+            self.progress_label.setText(text)
 
     def clear_log(self) -> None:
-        self.log.clear()
+        self.recent_messages.clear()
 
 
 APP_STYLE = f"""
@@ -2022,6 +2670,33 @@ QFrame#Card {{
     background: {PANEL};
     border-radius: 18px;
 }}
+QFrame#HistoryCard {{
+    background: #202020;
+    border-radius: 14px;
+}}
+QFrame#HistoryPreview {{
+    background: #0b0b0b;
+    border-radius: 10px;
+}}
+QWidget#HistoryViewport {{
+    background: transparent;
+}}
+QScrollArea#HistoryScroll {{
+    background: transparent;
+    border: none;
+}}
+QLabel#HistoryTitle {{
+    color: {TEXT};
+    font-size: 12px;
+    font-weight: 760;
+}}
+QLabel#HistoryMeta, QLabel#HistoryEmpty {{
+    color: {MUTED};
+    font-size: 11px;
+}}
+QLabel#HistoryEmpty {{
+    padding-top: 42px;
+}}
 QFrame#StatusPill {{
     background: {PANEL_2};
     border-radius: 15px;
@@ -2071,16 +2746,16 @@ QComboBox QAbstractItemView {{
 }}
 QScrollBar:vertical {{
     background: transparent;
-    width: 8px;
-    margin: 6px 2px 6px 0;
+    width: 12px;
+    margin: 8px 3px 8px 3px;
 }}
 QScrollBar::handle:vertical {{
-    background: #505050;
-    min-height: 28px;
-    border-radius: 4px;
+    background: #585858;
+    min-height: 38px;
+    border-radius: 6px;
 }}
 QScrollBar::handle:vertical:hover {{
-    background: #626262;
+    background: #767676;
 }}
 QScrollBar::add-line:vertical,
 QScrollBar::sub-line:vertical,
@@ -2161,6 +2836,21 @@ QPushButton#IconButton {{
 QPushButton#IconButton:hover {{
     background: {PANEL_3};
 }}
+QPushButton#HistoryButton {{
+    background: {PANEL_2};
+    color: {TEXT};
+    border-radius: 9px;
+    min-height: 24px;
+    padding: 4px 6px;
+    font-size: 11px;
+}}
+QPushButton#HistoryButton:hover {{
+    background: {PANEL_3};
+}}
+QPushButton#HistoryButton:disabled {{
+    background: #242424;
+    color: {SUBTLE};
+}}
 QCheckBox {{
     color: {MUTED};
     spacing: 8px;
@@ -2178,15 +2868,6 @@ QCheckBox::indicator:hover {{
 }}
 QCheckBox::indicator:checked {{
     background: {ACCENT};
-}}
-QPlainTextEdit#LogBox {{
-    background: {LOG_BG};
-    border: none;
-    border-radius: 14px;
-    padding: 9px;
-    color: #d7d7d7;
-    font-family: Consolas, monospace;
-    font-size: 11px;
 }}
 QProgressBar#DownloadProgress {{
     background: {PANEL_2};
@@ -2243,8 +2924,12 @@ QLabel#ErrorIcon {{
 
 
 def main() -> None:
+    set_windows_app_user_model_id()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_TITLE)
+    icon = app_icon()
+    if not icon.isNull():
+        app.setWindowIcon(icon)
     app.setFont(QFont("Segoe UI", 10))
     window = TubeDropApp()
     window.show()

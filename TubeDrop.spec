@@ -7,6 +7,8 @@ datas = []
 binaries = []
 hiddenimports = []
 
+datas += [("assets/tubedrop.ico", "assets")]
+
 for package in (
     "yt_dlp",
     "yt_dlp_ejs",
@@ -51,6 +53,7 @@ exe = EXE(
     a.datas,
     [],
     name="TubeDrop",
+    icon="assets/tubedrop.ico",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
