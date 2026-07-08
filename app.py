@@ -173,6 +173,82 @@ def is_tiktok_info(info: dict[str, Any]) -> bool:
     return platform_label_for_url(source_url) == "TikTok"
 
 
+def is_instagram_url(url: str) -> bool:
+    return platform_label_for_url(url) == "Instagram"
+
+
+def needs_vegas_compatible_mp4(choice: "DownloadChoice", url: str, recode: bool) -> bool:
+    return choice.kind == "video" and (recode or is_instagram_url(url))
+
+
+def make_vegas_compatible_mp4(source: Path, ffmpeg: str) -> Path:
+    source = source.resolve()
+    target = source if source.suffix.lower() == ".mp4" else source.with_suffix(".mp4")
+    temp = target.with_name(f"{target.stem}.vegas-tmp{target.suffix}")
+    temp.unlink(missing_ok=True)
+
+    args = [
+        ffmpeg,
+        "-y",
+        "-hide_banner",
+        "-i",
+        str(source),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-vf",
+        "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        "18",
+        "-pix_fmt",
+        "yuv420p",
+        "-profile:v",
+        "high",
+        "-level",
+        "4.2",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+        "-map_metadata",
+        "0",
+        "-movflags",
+        "+faststart",
+        "-f",
+        "mp4",
+        str(temp),
+    ]
+
+    try:
+        subprocess.run(
+            args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        temp.unlink(missing_ok=True)
+        details = clean_yt_text(exc.stderr or exc)
+        raise RuntimeError(f"не удалось подготовить MP4 для Vegas: {details}") from exc
+
+    os.replace(temp, target)
+    if target != source:
+        source.unlink(missing_ok=True)
+    return target
+
+
 def default_download_dir() -> Path:
     downloads = Path.home() / "Downloads"
     return downloads if downloads.exists() else Path.home()
@@ -1030,7 +1106,7 @@ class TubeDropApp(QMainWindow):
         self.filename_input = QLineEdit()
         self.filename_input.setPlaceholderText("Введите название")
         self.quality_combo = ModernComboBox()
-        self.recode_check = QCheckBox("Строго MP4")
+        self.recode_check = QCheckBox("MP4 для Vegas")
         self.playlist_check = QCheckBox("Плейлист целиком")
 
         self.auth_status_dot = StatusDot("idle")
@@ -1647,8 +1723,6 @@ class TubeDropApp(QMainWindow):
                         "-ac",
                         "2",
                     ]
-                    if recode:
-                        options["recodevideo"] = "mp4"
                 if postprocessor_args:
                     options["postprocessor_args"] = postprocessor_args
                 self.apply_cookie_options(options)
@@ -1678,6 +1752,11 @@ class TubeDropApp(QMainWindow):
             if last_error:
                 raise last_error
             final_file = find_new_media_file(folder, started_at)
+            if final_file and needs_vegas_compatible_mp4(choice, url, recode):
+                self.events.put(("prepare_progress", (-1, "Готовлю совместимый MP4 для Vegas...")))
+                self.events.put(("log", "Перекодирую видео в H.264/AAC MP4 для Vegas."))
+                final_file = make_vegas_compatible_mp4(final_file, ffmpeg)
+                self.events.put(("prepare_progress", (100, "MP4 для Vegas готов")))
             self.events.put(
                 (
                     "done",
