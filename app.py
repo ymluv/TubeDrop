@@ -16,8 +16,6 @@ from typing import Any
 from urllib.parse import urlparse
 
 try:
-    import imageio_ffmpeg
-    import requests
     from PIL import Image, ImageOps
     from PySide6.QtCore import QByteArray, QPointF, QRectF, QTimer, Qt, Signal
     from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap
@@ -38,12 +36,10 @@ try:
         QProgressBar,
         QPushButton,
         QScrollArea,
+        QSizePolicy,
         QVBoxLayout,
         QWidget,
     )
-    from yt_dlp import YoutubeDL
-    from yt_dlp.cookies import extract_cookies_from_browser
-    from yt_dlp.utils import DownloadCancelled
 except ImportError as exc:  # pragma: no cover - shown only before dependencies are installed
     app = QApplication(sys.argv)
     QMessageBox.critical(
@@ -117,9 +113,8 @@ THUMBNAIL_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_HISTORY_ITEMS = 120
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 MERGED_MP4_VIDEO_AUDIO_FORMAT = (
-    "bv[vcodec^=avc1]+ba[acodec^=mp4a]/"
-    "bv[ext=mp4]+ba[ext=m4a]/"
-    "bv+ba"
+    "bv+ba/"
+    "bv[ext=mp4]+ba[ext=m4a]"
 )
 PROGRESSIVE_VIDEO_AUDIO_FORMAT = (
     "b[ext=mp4][vcodec!=none][acodec!=none]/"
@@ -534,59 +529,69 @@ def find_download_thumbnail(folder: Path, media_path: Path | None, started_at: f
     return max(recent_candidates, key=lambda item: item.stat().st_mtime)
 
 
-PLATFORM_ICON_SVGS = {
-    "YouTube": """
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-          <rect x="6" y="14" width="52" height="36" rx="11" fill="#ff0033"/>
-          <path d="M28 24v16l15-8z" fill="#fff"/>
-        </svg>
-    """,
-    "TikTok": """
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-          <path d="M36 8h9c1 8 5 13 13 15v9c-5 0-10-2-14-5v17c0 10-8 17-18 17S8 54 8 44s8-17 18-17c2 0 4 0 6 1v10c-2-1-4-2-6-2-5 0-8 4-8 8s3 8 8 8 8-3 8-8V8z" fill="#fff"/>
-          <path d="M32 28v10c-2-1-4-2-6-2-5 0-8 4-8 8 0 2 1 5 3 6-5-1-9-6-9-12 0-7 6-13 14-13 2 0 4 1 6 3z" fill="#25f4ee"/>
-          <path d="M45 8c1 8 5 13 13 15v6c-8-1-14-6-17-13h-5V8z" fill="#fe2c55"/>
-        </svg>
-    """,
-    "Instagram": """
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-          <defs>
-            <linearGradient id="g" x1="10" y1="56" x2="56" y2="8" gradientUnits="userSpaceOnUse">
-              <stop offset="0" stop-color="#feda75"/>
-              <stop offset=".35" stop-color="#fa7e1e"/>
-              <stop offset=".65" stop-color="#d62976"/>
-              <stop offset="1" stop-color="#4f5bd5"/>
-            </linearGradient>
-          </defs>
-          <rect x="8" y="8" width="48" height="48" rx="14" fill="url(#g)"/>
-          <rect x="19" y="19" width="26" height="26" rx="8" fill="none" stroke="#fff" stroke-width="4"/>
-          <circle cx="32" cy="32" r="7" fill="none" stroke="#fff" stroke-width="4"/>
-          <circle cx="43" cy="21" r="3" fill="#fff"/>
-        </svg>
-    """,
-    "Pinterest": """
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-          <circle cx="32" cy="32" r="28" fill="#e60023"/>
-          <path d="M30 44c-2-1-4-2-5-4l-3 12c0 2-3 2-3 0l-1-1c1-6 3-12 4-18-1-2-1-4-1-6 0-8 6-14 14-14 7 0 12 5 12 12 0 9-5 17-12 17-3 0-5-2-5-5l1-4c1 2 2 3 4 3 4 0 7-5 7-11 0-4-3-7-8-7-6 0-9 4-9 9 0 2 1 4 2 5l-1 4c-3-1-5-5-5-9 0-7 6-13 15-13 8 0 14 5 14 12 0 9-6 17-14 17-3 0-5-1-6-3z" fill="#fff"/>
-        </svg>
-    """,
-    "Twitch": """
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-          <path d="M13 8h43v30L43 51H32l-8 8h-8v-8H8V19z" fill="#9146ff"/>
-          <path d="M18 14v29h10v8l8-8h12l8-8V14z" fill="#fff"/>
-          <path d="M42 23h5v13h-5zm-13 0h5v13h-5z" fill="#9146ff"/>
-        </svg>
-    """,
+PLATFORM_ICON_FILES = {
+    "YouTube": "youtube.svg",
+    "TikTok": "tiktok.svg",
+    "Instagram": "instagram.svg",
+    "Pinterest": "pinterest.svg",
+    "Twitch": "twitch.svg",
 }
+PLATFORM_ICON_CACHE: dict[str, str] = {}
 
 
 def platform_icon_svg(platform: str) -> str:
-    return PLATFORM_ICON_SVGS.get(platform, PLATFORM_ICON_SVGS["YouTube"])
+    normalized = platform if platform in PLATFORM_ICON_FILES else "YouTube"
+    if normalized not in PLATFORM_ICON_CACHE:
+        icon_path = resource_path(f"assets/social/{PLATFORM_ICON_FILES[normalized]}")
+        try:
+            PLATFORM_ICON_CACHE[normalized] = icon_path.read_text(encoding="utf-8")
+        except OSError:
+            PLATFORM_ICON_CACHE[normalized] = ""
+    return PLATFORM_ICON_CACHE[normalized]
 
 
 def render_svg_icon(painter: QPainter, svg: str, rect: QRectF) -> None:
     renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
     renderer.render(painter, rect)
+
+
+def platform_icon_pixmap(platform: str, size: int = 28) -> QPixmap:
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    render_svg_icon(painter, platform_icon_svg(platform), QRectF(0, 0, size, size))
+    painter.end()
+    return pixmap
+
+
+def draw_history_view_symbol(painter: QPainter, mode: str, rect: QRectF, color: QColor) -> None:
+    painter.save()
+    painter.setPen(QPen(color, 1.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    if mode == "list":
+        for offset in (2.0, 7.0, 12.0):
+            top = rect.top() + offset
+            painter.drawRoundedRect(QRectF(rect.left() + 1.5, top, 3.5, 3.5), 0.8, 0.8)
+            painter.drawLine(QPointF(rect.left() + 8, top + 1.75), QPointF(rect.right() - 1.5, top + 1.75))
+    else:
+        for left in (rect.left() + 1.5, rect.left() + 9.5):
+            for top in (rect.top() + 1.5, rect.top() + 9.5):
+                painter.drawRoundedRect(QRectF(left, top, 6.5, 6.5), 1.4, 1.4)
+    painter.restore()
+
+
+def draw_trash_symbol(painter: QPainter, rect: QRectF, color: QColor) -> None:
+    painter.save()
+    pen = QPen(color, 1.7, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+    painter.setPen(pen)
+    center_x = rect.center().x()
+    painter.drawLine(QPointF(rect.left() + 2, rect.top() + 4.5), QPointF(rect.right() - 2, rect.top() + 4.5))
+    painter.drawLine(QPointF(center_x - 2.5, rect.top() + 2.5), QPointF(center_x + 2.5, rect.top() + 2.5))
+    body = QRectF(rect.left() + 3.5, rect.top() + 7, rect.width() - 7, rect.height() - 9)
+    painter.drawRoundedRect(body, 1.8, 1.8)
+    painter.drawLine(QPointF(center_x - 2.5, body.top() + 3), QPointF(center_x - 2.5, body.bottom() - 2))
+    painter.drawLine(QPointF(center_x + 2.5, body.top() + 3), QPointF(center_x + 2.5, body.bottom() - 2))
+    painter.restore()
 
 
 def app_icon() -> QIcon:
@@ -860,19 +865,8 @@ class HistoryPreview(QFrame):
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(0, 0, 0, 80 if self.delete_hovered else 45))
         painter.drawRoundedRect(rect, 11, 11)
-
-        pen = QPen(icon_color, 1.8)
-        pen.setCapStyle(Qt.RoundCap)
-        pen.setJoinStyle(Qt.RoundJoin)
-        painter.setPen(pen)
-        cx = rect.center().x()
-        top = rect.top() + 8
-        painter.drawLine(QPointF(cx - 7, top + 2), QPointF(cx + 7, top + 2))
-        painter.drawLine(QPointF(cx - 4, top), QPointF(cx + 4, top))
-        body = QRectF(cx - 6, top + 5, 12, 12)
-        painter.drawRoundedRect(body, 2, 2)
-        painter.drawLine(QPointF(cx - 2.5, top + 8), QPointF(cx - 2.5, top + 14))
-        painter.drawLine(QPointF(cx + 2.5, top + 8), QPointF(cx + 2.5, top + 14))
+        icon_rect = QRectF(rect.center().x() - 9, rect.center().y() - 9, 18, 18)
+        draw_trash_symbol(painter, icon_rect, icon_color)
 
     def paintEvent(self, event) -> None:  # noqa: ARG002, ANN001 - custom clipped preview painter
         painter = QPainter(self)
@@ -965,6 +959,181 @@ class HistoryCard(QFrame):
         folder_btn.clicked.connect(lambda: self.on_open_folder(folder_path, file_path))
         actions.addWidget(folder_btn, 1)
         layout.addLayout(actions)
+
+
+class HistoryListPreview(QFrame):
+    def __init__(self, platform: str, thumbnail: Path | None = None, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.platform = platform
+        self._pixmap = thumbnail_pixmap_from_file(thumbnail, 88, 50) if thumbnail else QPixmap()
+        self.setObjectName("HistoryListPreview")
+        self.setFixedSize(88, 50)
+
+    def paintEvent(self, event) -> None:  # noqa: ARG002, ANN001 - custom clipped preview painter
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        path = QPainterPath()
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path.addRoundedRect(rect, 8, 8)
+        painter.fillPath(path, QColor("#0b0b0b"))
+        painter.setClipPath(path)
+        if not self._pixmap.isNull():
+            scaled = self._pixmap.scaled(self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+            painter.drawPixmap((self.width() - scaled.width()) // 2, (self.height() - scaled.height()) // 2, scaled)
+        else:
+            painter.setPen(QColor(SUBTLE))
+            painter.setFont(QFont(FONT_STACK, 9, QFont.Weight.DemiBold))
+            painter.drawText(self.rect(), Qt.AlignCenter, self.platform)
+
+
+class HistoryDeleteButton(QPushButton):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.hovered = False
+        self.setObjectName("HistoryDeleteButton")
+        self.setFixedSize(34, 32)
+        self.setToolTip("Удалить из истории")
+
+    def enterEvent(self, event) -> None:  # noqa: ANN001 - Qt event type differs by binding version
+        self.hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: ANN001 - Qt event type differs by binding version
+        self.hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: ARG002, ANN001 - exact optical centering
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        if self.hovered:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor("#351a1d"))
+            painter.drawRoundedRect(QRectF(self.rect()), 9, 9)
+        icon_rect = QRectF(self.width() / 2 - 9, self.height() / 2 - 9, 18, 18)
+        draw_trash_symbol(painter, icon_rect, QColor("#ef4444" if self.hovered else "#b8b8b8"))
+
+
+class HistoryViewButton(QPushButton):
+    def __init__(self, mode: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.mode = mode
+        self.hovered = False
+        self.setObjectName("HistoryViewButton")
+        self.setCheckable(True)
+        self.setFixedSize(30, 28)
+        self.setToolTip("Показывать списком" if mode == "list" else "Показывать плиткой")
+
+    def enterEvent(self, event) -> None:  # noqa: ANN001 - Qt event type differs by binding version
+        self.hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: ANN001 - Qt event type differs by binding version
+        self.hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: ARG002, ANN001 - exact optical centering
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        if self.isChecked() or self.hovered:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(ACCENT if self.isChecked() else PANEL_3))
+            painter.drawRoundedRect(QRectF(self.rect()), 8, 8)
+        icon_rect = QRectF(self.width() / 2 - 9, self.height() / 2 - 9, 18, 18)
+        draw_history_view_symbol(painter, self.mode, icon_rect, QColor("#ffffff"))
+
+
+class ElidedLabel(QLabel):
+    def __init__(self, text: str, parent: QWidget | None = None) -> None:
+        super().__init__(text, parent)
+        self.full_text = text
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+
+    def resizeEvent(self, event) -> None:  # noqa: ANN001 - Qt event type differs by binding version
+        visible = self.fontMetrics().elidedText(self.full_text, Qt.ElideRight, max(0, self.width()))
+        if visible != self.text():
+            super().setText(visible)
+        super().resizeEvent(event)
+
+
+class HistoryListItem(QFrame):
+    def __init__(
+        self,
+        item: dict[str, Any],
+        on_open_file: Any,
+        on_open_folder: Any,
+        on_delete: Any,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("HistoryListItem")
+        self.setFixedHeight(70)
+
+        file_text = str(item.get("file") or "")
+        folder_text = str(item.get("folder") or "")
+        file_path = Path(file_text) if file_text else Path("__missing_file__")
+        folder_path = Path(folder_text) if folder_text else Path("__missing_folder__")
+        thumbnail = Path(str(item.get("thumbnail") or "")) if item.get("thumbnail") else None
+        if thumbnail and not thumbnail.exists():
+            thumbnail = None
+        platform = str(item.get("platform") or "сайт")
+        item_id = str(item.get("id") or "")
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(9, 9, 8, 9)
+        layout.setSpacing(9)
+        layout.addWidget(HistoryListPreview(platform, thumbnail))
+
+        source_icon = QLabel()
+        source_icon.setObjectName("HistorySourceIcon")
+        source_icon.setFixedSize(28, 28)
+        source_icon.setPixmap(platform_icon_pixmap(platform, 26))
+        source_icon.setAlignment(Qt.AlignCenter)
+        source_icon.setToolTip(platform)
+        layout.addWidget(source_icon)
+
+        info_widget = QWidget()
+        info_widget.setObjectName("HistoryListInfo")
+        info_widget.setMinimumWidth(72)
+        info_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        info = QVBoxLayout(info_widget)
+        info.setContentsMargins(0, 2, 0, 2)
+        info.setSpacing(3)
+        title = ElidedLabel(str(item.get("title") or "Без названия"))
+        title.setObjectName("HistoryListTitle")
+        title.setToolTip(title.full_text)
+        info.addWidget(title)
+
+        downloaded_at = format_history_time(item.get("downloaded_at"))
+        filename = file_path.name if file_text else "Файл не найден"
+        meta_text = " · ".join(part for part in (downloaded_at, filename) if part)
+        meta = ElidedLabel(meta_text)
+        meta.setObjectName("HistoryListMeta")
+        meta.setToolTip(file_text)
+        info.addWidget(meta)
+        layout.addWidget(info_widget, 1)
+
+        open_btn = QPushButton("Открыть")
+        open_btn.setObjectName("HistoryListButton")
+        open_btn.setFixedSize(64, 32)
+        open_btn.setEnabled(file_path.exists())
+        open_btn.clicked.connect(lambda: on_open_file(file_path))
+        layout.addWidget(open_btn)
+
+        folder_btn = QPushButton("Папка")
+        folder_btn.setObjectName("HistoryListButton")
+        folder_btn.setFixedSize(54, 32)
+        folder_btn.setEnabled(folder_path.exists() or (bool(file_text) and file_path.parent.exists()))
+        folder_btn.clicked.connect(lambda: on_open_folder(folder_path, file_path))
+        layout.addWidget(folder_btn)
+
+        delete_btn = HistoryDeleteButton()
+        delete_btn.clicked.connect(lambda: on_delete(item_id))
+        layout.addWidget(delete_btn)
 
 
 class StatusDot(QWidget):
@@ -1079,6 +1248,7 @@ class WindowControlButton(QPushButton):
         self.hovered = False
         self.setObjectName("CloseButton" if close_button else "WindowButton")
         self.setFixedSize(34, 30)
+        self.setToolTip("Закрыть" if close_button else "Свернуть")
 
     def enterEvent(self, event) -> None:  # noqa: ANN001 - Qt event type differs by binding version
         self.hovered = True
@@ -1090,20 +1260,22 @@ class WindowControlButton(QPushButton):
         self.update()
         super().leaveEvent(event)
 
-    def paintEvent(self, event) -> None:  # noqa: ARG002, ANN001 - custom centered text painter
-        from PySide6.QtGui import QColor, QPainter
-
+    def paintEvent(self, event) -> None:  # noqa: ARG002, ANN001 - exact optical centering
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         if self.hovered:
             painter.setBrush(QColor("#7f1d1d" if self.close_button else PANEL_3))
             painter.setPen(Qt.NoPen)
             painter.drawRoundedRect(self.rect(), 10, 10)
-        painter.setPen(QColor("#ffffff" if self.hovered and self.close_button else MUTED))
-        font = QFont(FONT_STACK, 14)
-        font.setWeight(QFont.Weight.DemiBold)
-        painter.setFont(font)
-        painter.drawText(self.rect(), Qt.AlignCenter, self.symbol)
+        color = QColor("#ffffff" if self.hovered and self.close_button else MUTED)
+        pen = QPen(color, 1.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        painter.setPen(pen)
+        center = QPointF(self.width() / 2, self.height() / 2)
+        if self.close_button:
+            painter.drawLine(QPointF(center.x() - 4.5, center.y() - 4.5), QPointF(center.x() + 4.5, center.y() + 4.5))
+            painter.drawLine(QPointF(center.x() + 4.5, center.y() - 4.5), QPointF(center.x() - 4.5, center.y() + 4.5))
+        else:
+            painter.drawLine(QPointF(center.x() - 5, center.y()), QPointF(center.x() + 5, center.y()))
 
 
 class PlatformIcon(QWidget):
@@ -1500,6 +1672,7 @@ class TubeDropApp(QMainWindow):
         self.app_state = load_app_state()
         self.settings = self.app_state.get("settings", {})
         self.download_history = clean_history_items(self.app_state.get("history", []))
+        self.history_view_mode = "list" if self.settings.get("history_view") == "list" else "grid"
         self._loading_settings = True
         self.setWindowTitle(APP_TITLE)
         icon = app_icon()
@@ -1642,6 +1815,15 @@ class TubeDropApp(QMainWindow):
         history_title.setObjectName("SectionTitle")
         history_header.addWidget(history_title)
         history_header.addStretch(1)
+
+        self.history_grid_btn = HistoryViewButton("grid")
+        self.history_grid_btn.clicked.connect(lambda: self.set_history_view("grid"))
+        history_header.addWidget(self.history_grid_btn)
+
+        self.history_list_btn = HistoryViewButton("list")
+        self.history_list_btn.clicked.connect(lambda: self.set_history_view("list"))
+        history_header.addWidget(self.history_list_btn)
+        self.update_history_view_buttons()
         history_layout.addLayout(history_header)
 
         self.history_scroll = QScrollArea()
@@ -1824,6 +2006,7 @@ class TubeDropApp(QMainWindow):
             "quality_label": self.quality_combo.currentText().strip(),
             "recode_for_vegas": self.recode_check.isChecked(),
             "playlist_whole": self.playlist_check.isChecked(),
+            "history_view": self.history_view_mode,
         }
         self.preferred_quality_label = self.settings["quality_label"]
         self.app_state["settings"] = self.settings
@@ -1841,10 +2024,29 @@ class TubeDropApp(QMainWindow):
             item = layout.takeAt(0)
             widget = item.widget()
             if widget:
+                widget.setParent(None)
                 widget.deleteLater()
+
+    def update_history_view_buttons(self) -> None:
+        if not hasattr(self, "history_grid_btn"):
+            return
+        self.history_grid_btn.setChecked(self.history_view_mode == "grid")
+        self.history_list_btn.setChecked(self.history_view_mode == "list")
+
+    def set_history_view(self, mode: str) -> None:
+        normalized = "list" if mode == "list" else "grid"
+        changed = normalized != self.history_view_mode
+        self.history_view_mode = normalized
+        self.update_history_view_buttons()
+        if changed:
+            self.refresh_history()
+            self.save_current_settings()
 
     def refresh_history(self) -> None:
         self.clear_grid_layout(self.history_grid)
+        list_mode = self.history_view_mode == "list"
+        self.history_grid.setHorizontalSpacing(0 if list_mode else 8)
+        self.history_grid.setVerticalSpacing(7 if list_mode else 8)
         if not self.download_history:
             empty_label = QLabel("История пока пустая")
             empty_label.setObjectName("HistoryEmpty")
@@ -1853,6 +2055,15 @@ class TubeDropApp(QMainWindow):
             return
 
         for index, item in enumerate(self.download_history[:MAX_HISTORY_ITEMS]):
+            if list_mode:
+                row_item = HistoryListItem(
+                    item,
+                    self.open_history_file,
+                    self.open_history_folder,
+                    self.remove_history_item,
+                )
+                self.history_grid.addWidget(row_item, index, 0, 1, 3)
+                continue
             row = index // 3
             column = index % 3
             card = HistoryCard(item, self.open_history_file, self.open_history_folder, self.remove_history_item)
@@ -2035,6 +2246,8 @@ class TubeDropApp(QMainWindow):
 
     def fetch_info_worker(self, url: str, noplaylist: bool) -> None:
         try:
+            from yt_dlp import YoutubeDL
+
             options: dict[str, Any] = {
                 "quiet": True,
                 "no_warnings": True,
@@ -2076,6 +2289,8 @@ class TubeDropApp(QMainWindow):
                 self.events.put(("error", message))
 
     def refresh_cookie_file_from_secure_browser(self, attempts: int = 1, delay: float = 0.0) -> bool:
+        from yt_dlp.cookies import extract_cookies_from_browser
+
         browser = secure_browser_choice()
         if not browser:
             return False
@@ -2154,16 +2369,10 @@ class TubeDropApp(QMainWindow):
                 if fmt.get("vcodec") != "none" and fmt.get("height") == height and fmt.get("fps")
             ]
             fps_hint = f" {int(max(fps_values))}fps" if fps_values and max(fps_values) > 30 else ""
-            merged_height_format = (
-                f"bv[height<={height}][vcodec^=avc1]+ba[acodec^=mp4a]/"
-                f"bv[height<={height}][ext=mp4]+ba[ext=m4a]/"
-                f"bv[height<={height}]+ba"
-            )
+            merged_height_format = f"bv[height={height}]+ba"
             progressive_height_format = (
-                f"b[height<={height}][ext=mp4][vcodec!=none][acodec!=none]/"
-                f"best[height<={height}][ext=mp4][vcodec!=none][acodec!=none]/"
-                f"b[height<={height}][vcodec!=none][acodec!=none]/"
-                f"best[height<={height}][vcodec!=none][acodec!=none]"
+                f"b[height={height}][vcodec!=none][acodec!=none]/"
+                f"best[height={height}][vcodec!=none][acodec!=none]"
             )
             height_format = (
                 f"{progressive_height_format}/{merged_height_format}"
@@ -2175,7 +2384,7 @@ class TubeDropApp(QMainWindow):
                     f"{height}p{fps_hint} MP4",
                     height_format,
                     "video",
-                    fallback_format=fallback_video_format,
+                    fallback_format=None,
                 )
             )
 
@@ -2241,6 +2450,8 @@ class TubeDropApp(QMainWindow):
 
     def load_thumbnail_worker(self, url: str) -> None:
         try:
+            import requests
+
             response = requests.get(url, timeout=15)
             response.raise_for_status()
             image = Image.open(io.BytesIO(response.content)).convert("RGB")
@@ -2312,7 +2523,12 @@ class TubeDropApp(QMainWindow):
         noplaylist: bool,
         recode: bool,
     ) -> None:
+        from yt_dlp import YoutubeDL
+        from yt_dlp.utils import DownloadCancelled
+
         try:
+            import imageio_ffmpeg
+
             started_at = time.time()
             ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
             postprocessors = []
@@ -2420,6 +2636,8 @@ class TubeDropApp(QMainWindow):
                 self.events.put(("error", message))
 
     def progress_hook(self, data: dict[str, Any]) -> None:
+        from yt_dlp.utils import DownloadCancelled
+
         if self.cancel_requested.is_set():
             raise DownloadCancelled("Отменено пользователем")
 
@@ -2441,6 +2659,8 @@ class TubeDropApp(QMainWindow):
             self.events.put(("prepare_progress", (-1, "Ожидаю подготовку файла...")))
 
     def postprocessor_hook(self, data: dict[str, Any]) -> None:
+        from yt_dlp.utils import DownloadCancelled
+
         if self.cancel_requested.is_set():
             raise DownloadCancelled("Отменено пользователем")
 
@@ -2674,11 +2894,25 @@ QFrame#HistoryCard {{
     background: #202020;
     border-radius: 14px;
 }}
+QFrame#HistoryListItem {{
+    background: #202020;
+    border-radius: 11px;
+}}
 QFrame#HistoryPreview {{
     background: #0b0b0b;
     border-radius: 10px;
 }}
+QFrame#HistoryListPreview {{
+    background: #0b0b0b;
+    border-radius: 8px;
+}}
+QLabel#HistorySourceIcon {{
+    background: transparent;
+}}
 QWidget#HistoryViewport {{
+    background: transparent;
+}}
+QWidget#HistoryListInfo {{
     background: transparent;
 }}
 QScrollArea#HistoryScroll {{
@@ -2689,6 +2923,15 @@ QLabel#HistoryTitle {{
     color: {TEXT};
     font-size: 12px;
     font-weight: 760;
+}}
+QLabel#HistoryListTitle {{
+    color: {TEXT};
+    font-size: 11px;
+    font-weight: 760;
+}}
+QLabel#HistoryListMeta {{
+    color: {MUTED};
+    font-size: 10px;
 }}
 QLabel#HistoryMeta, QLabel#HistoryEmpty {{
     color: {MUTED};
@@ -2836,6 +3079,21 @@ QPushButton#IconButton {{
 QPushButton#IconButton:hover {{
     background: {PANEL_3};
 }}
+QPushButton#HistoryViewButton {{
+    background: transparent;
+    border-radius: 8px;
+    min-width: 30px;
+    max-width: 30px;
+    min-height: 28px;
+    max-height: 28px;
+    padding: 0;
+}}
+QPushButton#HistoryViewButton:hover {{
+    background: {PANEL_3};
+}}
+QPushButton#HistoryViewButton:checked {{
+    background: {ACCENT};
+}}
 QPushButton#HistoryButton {{
     background: {PANEL_2};
     color: {TEXT};
@@ -2850,6 +3108,34 @@ QPushButton#HistoryButton:hover {{
 QPushButton#HistoryButton:disabled {{
     background: #242424;
     color: {SUBTLE};
+}}
+QPushButton#HistoryListButton {{
+    background: {PANEL_2};
+    color: {TEXT};
+    border-radius: 9px;
+    min-height: 32px;
+    max-height: 32px;
+    padding: 0;
+    font-size: 10px;
+}}
+QPushButton#HistoryListButton:hover {{
+    background: {PANEL_3};
+}}
+QPushButton#HistoryListButton:disabled {{
+    background: #242424;
+    color: {SUBTLE};
+}}
+QPushButton#HistoryDeleteButton {{
+    background: transparent;
+    border-radius: 9px;
+    min-width: 34px;
+    max-width: 34px;
+    min-height: 32px;
+    max-height: 32px;
+    padding: 0;
+}}
+QPushButton#HistoryDeleteButton:hover {{
+    background: #351a1d;
 }}
 QCheckBox {{
     color: {MUTED};

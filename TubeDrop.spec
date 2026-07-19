@@ -7,7 +7,10 @@ datas = []
 binaries = []
 hiddenimports = []
 
-datas += [("assets/tubedrop.ico", "assets")]
+datas += [
+    ("assets/tubedrop.ico", "assets"),
+    ("assets/social/*.svg", "assets/social"),
+]
 
 for package in (
     "yt_dlp",
@@ -49,9 +52,8 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="TubeDrop",
     icon="assets/tubedrop.ico",
     debug=False,
@@ -66,4 +68,14 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+app = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name="TubeDrop",
 )
